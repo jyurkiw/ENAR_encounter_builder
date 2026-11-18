@@ -1,0 +1,4 @@
+[env]
+# Headless UI tests render with the CPU renderer. Creating a GPU device for
+# every simulated frame makes the suite ~200x slower and gains nothing.
+ICED_TEST_BACKEND = "tiny-skia"

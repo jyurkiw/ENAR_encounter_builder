@@ -1,0 +1,26 @@
+[package]
+name = "encounter-designer"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dirs = "7.0.0"
+iced = { version = "0.14", features = ["image", "tokio"] }
+rfd = "0.18.0"
+roxmltree = "0.21.2"
+serde = { version = "1.0.229", features = ["derive"] }
+tokio = { version = "1", features = ["process", "rt"] }
+toml = "1.2.1"
+
+[dev-dependencies]
+futures = "0.3.34"
+iced_test = "0.14"
+tempfile = "3.27.0"
+
+# Optimise dependencies (iced, the renderers) even in dev builds: the app and
+# the headless UI tests run much faster, and our own code still builds quickly.
+[profile.dev.package."*"]
+opt-level = 2
+
+[build-dependencies]
+embed-resource = "3.0.12"

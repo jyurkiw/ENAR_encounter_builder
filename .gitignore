@@ -1,0 +1,30 @@
+# Rust build output (also holds the throwaway compiler experiments in
+# target/srd-tex, target/srd-pdf, ...)
+/target/
+
+# Cargo.lock stays tracked: this is a program, so builds should be repeatable.
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# LaTeX/encompile output, should any land here (the app compiles stat blocks
+# in %LOCALAPPDATA%\encounter-designer, not in the repository)
+*.aux
+*.log
+*.out
+*.toc
+.encompile-*/
+
+# Office lock files (Encounter1.xlsx open in Excel)
+~$*
+
+# Editors and OS
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+desktop.ini

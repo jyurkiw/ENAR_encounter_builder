@@ -1,0 +1,3 @@
+// Windows resources for the .exe: the icon Explorer, the taskbar and
+// shortcuts show. Built by build.rs; regenerate icon.ico with tools/make_icon.py.
+1 ICON "icon.ico"
