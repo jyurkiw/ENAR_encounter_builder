@@ -1,0 +1,32 @@
+<encounter id="bridge-ambush" level="3" numPCs="5">
+    <group name="Bridge Ambush">
+        <baseMonsterRoster>
+            <monster id="bandit-sniper" count="2" />
+            <monster id="bandit-sharpshooter" count="2" />
+            <monster id="bandit-deadeye" count="1" />
+            <monster id="bandit-fisherman" count="2" />
+            <monster id="dohovos_threll" />
+        </baseMonsterRoster>
+        <altMonsterRoster level="4" numPCs="5">
+            <monster id="bandit-sniper" count="3" />
+            <monster id="bandit-sharpshooter" count="1" />
+            <monster id="bandit-deadeye" count="2" />
+            <monster id="bandit-fisherman" count="3" />
+            <monster id="dohovos_threll" />
+        </altMonsterRoster>
+        <altMonsterRoster level="5" numPCs="5">
+            <monster id="bandit-sharpshooter" count="2" />
+            <monster id="bandit-deadeye" count="3" />
+            <monster id="bandit-fisherman" count="2" />
+            <monster id="dohovos_threll" />
+        </altMonsterRoster>
+    </group>
+    <reference>
+        <monster id="bandit-sniper" file="res://monsters/highway-adventures/fyier-forest-bandits/snipers.xml" monster="bandit-deadeye" displayName="Fyier Forest Sniper" shortName="Sniper"/>
+        <monster id="bandit-sharpshooter" file="res://monsters/highway-adventures/fyier-forest-bandits/snipers.xml" monster="bandit-sharpshooter" displayName="Fyier Forest Sharpshooter" shortName="Sharpshooter"/>
+        <monster id="bandit-deadeye" file="res://monsters/highway-adventures/fyier-forest-bandits/snipers.xml" monster="bandit-deadeye" displayName="Fyier Forest Deadeye" shortName="Deadeye"/>
+        <monster id="bandit-fisherman" file="res://monsters/highway-adventures/fyier-forest-bandits/fishermen.xml" monster="bandit-deadeye" displayName="Fyier Forest Fisherman" shortName="Fisherman"/>
+        <monster id="dohovos_threll" file="res://monsters/highway-adventures/fyier-forest-bandits/Dohovos_Threll_triton_ambusher.xml" monster="triton_ambusher" displayName="Dohovos Threll" shortName="Dohovos"/>
+        <monster id="triton_ambusher" file="res://monsters/highway-adventures/fyier-forest-bandits/Dohovos_Threll_triton_ambusher.xml" monster="triton_ambusher" />
+    </reference>
+</encounter>
