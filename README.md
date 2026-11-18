@@ -12,6 +12,15 @@ cargo run
 
 The first launch writes a config file with defaults (see **Configuration**).
 
+To build both the debug and the release executable in one go (Cargo builds one profile per command):
+
+```powershell
+.\build.ps1          # cargo build, then cargo build --release
+.\build.ps1 -Test    # run the tests first, and build only if they pass
+```
+
+The release build is `target\release\encounter-designer.exe`: smaller and faster, and a single file you can copy anywhere or pin to the taskbar.
+
 To draw stat blocks in the monster viewer, the app also needs:
 
 - [uv](https://docs.astral.sh/uv/) on `PATH` (or set `uv_command` in the config file)
@@ -86,5 +95,6 @@ Native file dialogs and the real window's behaviour aren't covered; those are te
 | `scripts/statblock.py` | Run by the app through uv: compiles one monster with encompile and crops its stat block to PNGs |
 | `tools/make_icon.py` | Draws the icon from its 16x16 pixel grid into `assets/` |
 | `build.rs`, `assets/app.rc` | Embed the icon in the Windows `.exe` |
+| `build.ps1` | Builds debug and release (optionally testing first) |
 
 To change the icon, edit the grid in `tools/make_icon.py` and run `python tools/make_icon.py`.
