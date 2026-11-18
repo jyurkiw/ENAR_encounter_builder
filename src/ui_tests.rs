@@ -915,9 +915,9 @@ fn the_party_steppers_fit_beside_the_viewer() {
 fn the_target_follows_the_intended_difficulty_range() {
     let mut h = Harness::new();
     h.click("New");
-    h.edit(editor::Edit::MaxDifficulty(xp::Tier::High));
+    h.edit(editor::Edit::MaxDifficulty(0, xp::Tier::High));
     h.assert_shows("Target (Moderate to High): 201 – 400 XP");
-    h.edit(editor::Edit::MinDifficulty(xp::Tier::Low));
+    h.edit(editor::Edit::MinDifficulty(0, xp::Tier::Low));
     h.assert_shows("Target (Low to High): 1 – 400 XP");
     assert!(h.doc().dirty);
 }
@@ -926,10 +926,10 @@ fn the_target_follows_the_intended_difficulty_range() {
 fn difficulty_pickers_keep_the_range_the_right_way_up() {
     let mut h = Harness::new();
     h.click("New");
-    h.edit(editor::Edit::MinDifficulty(xp::Tier::High)); // above the top: raises it
-    assert_eq!((h.doc().encounter.min_difficulty, h.doc().encounter.max_difficulty), (xp::Tier::High, xp::Tier::High));
-    h.edit(editor::Edit::MaxDifficulty(xp::Tier::Low)); // below the bottom: lowers it
-    assert_eq!((h.doc().encounter.min_difficulty, h.doc().encounter.max_difficulty), (xp::Tier::Low, xp::Tier::Low));
+    h.edit(editor::Edit::MinDifficulty(0, xp::Tier::High)); // above the top: raises it
+    assert_eq!((h.doc().encounter.groups[0].min_difficulty, h.doc().encounter.groups[0].max_difficulty), (xp::Tier::High, xp::Tier::High));
+    h.edit(editor::Edit::MaxDifficulty(0, xp::Tier::Low)); // below the bottom: lowers it
+    assert_eq!((h.doc().encounter.groups[0].min_difficulty, h.doc().encounter.groups[0].max_difficulty), (xp::Tier::Low, xp::Tier::Low));
     h.assert_shows("Target (Low): 1 – 200 XP");
 }
 
@@ -939,7 +939,7 @@ fn the_spreadsheet_case_level_3_five_pcs_moderate_to_high() {
     h.click("New");
     h.edit(editor::Edit::Level(3));
     h.edit(editor::Edit::Pcs(5));
-    h.edit(editor::Edit::MaxDifficulty(xp::Tier::High));
+    h.edit(editor::Edit::MaxDifficulty(0, xp::Tier::High));
     h.click("▸ Bandits  (2)");
     h.click("Bandit Deadeye (CR 2)");
     h.click("Add to roster");
@@ -960,8 +960,8 @@ fn the_spreadsheet_case_level_3_five_pcs_moderate_to_high() {
 #[test]
 fn the_difficulty_range_is_saved_with_the_encounter() {
     let mut h = Harness::new_with_aboleth();
-    h.edit(editor::Edit::MinDifficulty(xp::Tier::Low));
-    h.edit(editor::Edit::MaxDifficulty(xp::Tier::High));
+    h.edit(editor::Edit::MinDifficulty(0, xp::Tier::Low));
+    h.edit(editor::Edit::MaxDifficulty(0, xp::Tier::High));
     let out = h.root.path().join("range.xml");
     h.dialogs.answer(vec![out.clone()]);
     h.click("Save");
@@ -972,7 +972,7 @@ fn the_difficulty_range_is_saved_with_the_encounter() {
     h.click("×");
     h.dialogs.answer(vec![out]);
     h.click("Open");
-    assert_eq!((h.doc().encounter.min_difficulty, h.doc().encounter.max_difficulty), (xp::Tier::Low, xp::Tier::High));
+    assert_eq!((h.doc().encounter.groups[0].min_difficulty, h.doc().encounter.groups[0].max_difficulty), (xp::Tier::Low, xp::Tier::High));
 }
 
 #[test]
@@ -981,9 +981,9 @@ fn choosing_the_difficulty_range_with_its_buttons() {
     h.click("New");
     // Each end has Low | Moderate | High; the second set is the top of the range.
     h.click_nth("High", 2);
-    assert_eq!(h.doc().encounter.max_difficulty, xp::Tier::High);
+    assert_eq!(h.doc().encounter.groups[0].max_difficulty, xp::Tier::High);
     h.click_nth("Low", 1);
-    assert_eq!(h.doc().encounter.min_difficulty, xp::Tier::Low);
+    assert_eq!(h.doc().encounter.groups[0].min_difficulty, xp::Tier::Low);
     h.assert_shows("Target (Low to High): 1 – 400 XP");
 }
 
@@ -1245,11 +1245,37 @@ fn raising_the_intended_difficulty_never_shrinks_what_can_be_added() {
     h.click("Add to roster");
     h.click("Add to roster");
     h.click("Add to roster"); // 300 XP
-    h.edit(editor::Edit::MinDifficulty(xp::Tier::Low));
-    h.edit(editor::Edit::MaxDifficulty(xp::Tier::High));
+    h.edit(editor::Edit::MinDifficulty(0, xp::Tier::Low));
+    h.edit(editor::Edit::MaxDifficulty(0, xp::Tier::High));
     h.assert_shows("In range · 1,700 XP to spare");
-    h.edit(editor::Edit::MinDifficulty(xp::Tier::Moderate));
+    h.edit(editor::Edit::MinDifficulty(0, xp::Tier::Moderate));
     h.assert_shows("Add 451 – 1,700 XP"); // still up to 1,700 more
-    h.edit(editor::Edit::MaxDifficulty(xp::Tier::Moderate));
+    h.edit(editor::Edit::MaxDifficulty(0, xp::Tier::Moderate));
     h.assert_shows("Add 451 – 825 XP");
+}
+
+#[test]
+fn each_group_has_its_own_intended_difficulty() {
+    let mut h = Harness::new_with_aboleth();
+    h.edit(editor::Edit::Level(10));
+    h.click("+ Group");
+    h.press("Aboleth (CR 10)");
+    h.drag_over("Base roster · level 10 · 4 PCs"); // the second group's (topmost)
+    h.release();
+    // Group 1 aims Low to High; Group 2 stays Moderate.
+    h.edit(editor::Edit::MinDifficulty(0, xp::Tier::Low));
+    h.edit(editor::Edit::MaxDifficulty(0, xp::Tier::High));
+    let groups = &h.doc().encounter.groups;
+    assert_eq!((groups[0].min_difficulty, groups[0].max_difficulty), (xp::Tier::Low, xp::Tier::High));
+    assert_eq!((groups[1].min_difficulty, groups[1].max_difficulty), (xp::Tier::Moderate, xp::Tier::Moderate));
+    // Level 10, 4 PCs: 6,400 / 9,200 / 12,400. Each roster measures against its group's range.
+    h.assert_shows("Target (Low to High): 1 – 12,400 XP");
+    h.assert_shows("Target (Moderate): 6,401 – 9,200 XP");
+
+    // The buttons: each group's card has its own two sets.
+    h.click_nth("High", 4); // Group 2's "to" High
+    assert_eq!(h.doc().encounter.groups[1].max_difficulty, xp::Tier::High);
+    assert_eq!(h.doc().encounter.groups[0].max_difficulty, xp::Tier::High); // unchanged
+    h.click_nth("Low", 1); // Group 1's "from" Low: already Low
+    assert_eq!(h.doc().encounter.groups[1].min_difficulty, xp::Tier::Moderate);
 }

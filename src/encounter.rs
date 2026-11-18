@@ -9,9 +9,6 @@ pub struct Encounter {
     pub id: String,
     pub level: u32,
     pub num_pcs: u32,
-    /// The difficulty range the encounter aims for, for every roster's party.
-    pub min_difficulty: Tier,
-    pub max_difficulty: Tier,
     pub groups: Vec<Group>,
     pub references: Vec<Reference>,
 }
@@ -19,8 +16,24 @@ pub struct Encounter {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Group {
     pub name: String,
+    /// The difficulty range the group aims for, for each of its rosters' parties.
+    pub min_difficulty: Tier,
+    pub max_difficulty: Tier,
     pub base_roster: Vec<RosterEntry>,
     pub alt_rosters: Vec<AltRoster>,
+}
+
+impl Group {
+    /// An empty group aiming for Moderate.
+    pub fn new(name: impl Into<String>) -> Group {
+        Group {
+            name: name.into(),
+            min_difficulty: Tier::Moderate,
+            max_difficulty: Tier::Moderate,
+            base_roster: Vec::new(),
+            alt_rosters: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -51,13 +64,7 @@ impl Default for Encounter {
             id: "new-encounter".into(),
             level: 1,
             num_pcs: 4,
-            min_difficulty: Tier::Moderate,
-            max_difficulty: Tier::Moderate,
-            groups: vec![Group {
-                name: "Group 1".into(),
-                base_roster: Vec::new(),
-                alt_rosters: Vec::new(),
-            }],
+            groups: vec![Group::new("Group 1")],
             references: Vec::new(),
         }
     }
@@ -71,10 +78,15 @@ impl Encounter {
             return Err(format!("root element is <{}>, not <encounter>", root.tag_name().name()));
         }
 
+        // Files from before the range moved onto groups set it on the
+        // encounter: that's the default for groups without their own.
+        let (min_default, max_default) = (tier(root, "minDifficulty")?, tier(root, "maxDifficulty")?);
         let groups = elements(root, "group")
             .map(|g| {
                 Ok(Group {
                     name: g.attribute("name").unwrap_or_default().to_string(),
+                    min_difficulty: tier_or(g, "minDifficulty", min_default)?,
+                    max_difficulty: tier_or(g, "maxDifficulty", max_default)?,
                     base_roster: match elements(g, "baseMonsterRoster").next() {
                         Some(r) => roster(r)?,
                         None => Vec::new(),
@@ -107,8 +119,6 @@ impl Encounter {
             id: root.attribute("id").unwrap_or_default().to_string(),
             level: number(root, "level", None)?,
             num_pcs: number(root, "numPCs", None)?,
-            min_difficulty: tier(root, "minDifficulty")?,
-            max_difficulty: tier(root, "maxDifficulty")?,
             groups,
             references,
         })
@@ -119,15 +129,19 @@ impl Encounter {
         let _ = writeln!(s, r#"<?xml version="1.0" encoding="UTF-8"?>"#);
         let _ = writeln!(
             s,
-            r#"<encounter id="{}" level="{}" numPCs="{}" minDifficulty="{}" maxDifficulty="{}">"#,
+            r#"<encounter id="{}" level="{}" numPCs="{}">"#,
             esc(&self.id),
             self.level,
-            self.num_pcs,
-            self.min_difficulty.name(),
-            self.max_difficulty.name()
+            self.num_pcs
         );
         for g in &self.groups {
-            let _ = writeln!(s, r#"    <group name="{}">"#, esc(&g.name));
+            let _ = writeln!(
+                s,
+                r#"    <group name="{}" minDifficulty="{}" maxDifficulty="{}">"#,
+                esc(&g.name),
+                g.min_difficulty.name(),
+                g.max_difficulty.name()
+            );
             write_roster(&mut s, "baseMonsterRoster", "", &g.base_roster);
             for alt in &g.alt_rosters {
                 let attrs = format!(r#" level="{}" numPCs="{}""#, alt.level, alt.num_pcs);
@@ -258,7 +272,7 @@ impl Encounter {
     pub fn add_group(&mut self) -> RosterRef {
         let n = self.groups.len() + 1;
         let name = (n..).map(|i| format!("Group {i}")).find(|name| !self.groups.iter().any(|g| &g.name == name)).unwrap();
-        self.groups.push(Group { name, base_roster: Vec::new(), alt_rosters: Vec::new() });
+        self.groups.push(Group::new(name));
         RosterRef { group: self.groups.len() - 1, roster: RosterSel::Base }
     }
 
@@ -327,8 +341,13 @@ fn number(node: roxmltree::Node, attr: &str, default: Option<u32>) -> Result<u32
 
 /// A difficulty attribute; Moderate when it's left out.
 fn tier(node: roxmltree::Node, attr: &str) -> Result<Tier, String> {
+    tier_or(node, attr, Tier::Moderate)
+}
+
+/// A difficulty attribute, or `default` when it's left out.
+fn tier_or(node: roxmltree::Node, attr: &str, default: Tier) -> Result<Tier, String> {
     match node.attribute(attr) {
-        None => Ok(Tier::Moderate),
+        None => Ok(default),
         Some(v) => Tier::parse(v).ok_or_else(|| {
             format!("<{}> has {attr}=\"{v}\"; use low, moderate or high", node.tag_name().name())
         }),
@@ -379,18 +398,34 @@ mod tests {
     }
 
     #[test]
-    fn difficulty_range_round_trips_and_defaults_to_moderate() {
+    fn each_group_has_its_own_difficulty_range() {
         let mut e = Encounter::default();
-        e.min_difficulty = Tier::Low;
-        e.max_difficulty = Tier::High;
+        e.add_group();
+        e.groups[0].min_difficulty = Tier::Low;
+        e.groups[0].max_difficulty = Tier::High;
         let xml = e.to_xml();
-        assert!(xml.contains(r#"minDifficulty="low" maxDifficulty="high""#), "{xml}");
+        assert!(xml.contains(r#"<group name="Group 1" minDifficulty="low" maxDifficulty="high">"#), "{xml}");
+        assert!(xml.contains(r#"<group name="Group 2" minDifficulty="moderate" maxDifficulty="moderate">"#), "{xml}");
+        assert!(!xml.contains("<encounter id=\"new-encounter\" level=\"1\" numPCs=\"4\" min"), "{xml}");
         assert_eq!(Encounter::parse(&xml).unwrap(), e);
+    }
 
-        let old = r#"<encounter id="x" level="2" numPCs="4"><group name="g"><baseMonsterRoster/></group><reference/></encounter>"#;
-        let parsed = Encounter::parse(old).unwrap();
-        assert_eq!((parsed.min_difficulty, parsed.max_difficulty), (Tier::Moderate, Tier::Moderate));
-        assert!(Encounter::parse(&old.replace(r#"numPCs="4""#, r#"numPCs="4" maxDifficulty="deadly""#)).is_err());
+    #[test]
+    fn difficulty_defaults_moderate_or_the_older_encounter_wide_range() {
+        let plain = r#"<encounter id="x" level="2" numPCs="4"><group name="g"><baseMonsterRoster/></group><reference/></encounter>"#;
+        let g = &Encounter::parse(plain).unwrap().groups[0];
+        assert_eq!((g.min_difficulty, g.max_difficulty), (Tier::Moderate, Tier::Moderate));
+
+        // Saved before the range moved to groups: it applies to every group
+        // that doesn't set its own.
+        let older = r#"<encounter id="x" level="2" numPCs="4" minDifficulty="low" maxDifficulty="high">
+            <group name="a"><baseMonsterRoster/></group>
+            <group name="b" maxDifficulty="moderate"><baseMonsterRoster/></group><reference/></encounter>"#;
+        let e = Encounter::parse(older).unwrap();
+        assert_eq!((e.groups[0].min_difficulty, e.groups[0].max_difficulty), (Tier::Low, Tier::High));
+        assert_eq!((e.groups[1].min_difficulty, e.groups[1].max_difficulty), (Tier::Low, Tier::Moderate));
+
+        assert!(Encounter::parse(&plain.replace(r#"<group name="g""#, r#"<group name="g" maxDifficulty="deadly""#)).is_err());
     }
 
     #[test]

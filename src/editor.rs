@@ -17,10 +17,10 @@ pub enum Edit {
     Id(String),
     Level(u32),
     Pcs(u32),
-    /// The easiest difficulty the encounter aims for (raises the top if needed).
-    MinDifficulty(Tier),
-    /// The hardest difficulty it aims for (lowers the bottom if needed).
-    MaxDifficulty(Tier),
+    /// The easiest difficulty a group aims for (raises the top if needed).
+    MinDifficulty(usize, Tier),
+    /// The hardest difficulty a group aims for (lowers the bottom if needed).
+    MaxDifficulty(usize, Tier),
     GroupName(usize, String),
     AddGroup,
     RemoveGroup(usize),
@@ -67,16 +67,16 @@ impl Document {
             Edit::Id(v) => set(&mut e.id, v),
             Edit::Level(v) => set(&mut e.level, v.clamp(1, 20)),
             Edit::Pcs(v) => set(&mut e.num_pcs, v.max(1)),
-            Edit::MinDifficulty(t) => {
-                let top = e.max_difficulty.max(t);
-                let raised = set(&mut e.max_difficulty, top);
-                set(&mut e.min_difficulty, t) | raised
-            }
-            Edit::MaxDifficulty(t) => {
-                let bottom = e.min_difficulty.min(t);
-                let lowered = set(&mut e.min_difficulty, bottom);
-                set(&mut e.max_difficulty, t) | lowered
-            }
+            Edit::MinDifficulty(g, t) => e.groups.get_mut(g).is_some_and(|g| {
+                let top = g.max_difficulty.max(t);
+                let raised = set(&mut g.max_difficulty, top);
+                set(&mut g.min_difficulty, t) | raised
+            }),
+            Edit::MaxDifficulty(g, t) => e.groups.get_mut(g).is_some_and(|g| {
+                let bottom = g.min_difficulty.min(t);
+                let lowered = set(&mut g.min_difficulty, bottom);
+                set(&mut g.max_difficulty, t) | lowered
+            }),
             Edit::GroupName(g, v) => e.groups.get_mut(g).is_some_and(|g| set(&mut g.name, v)),
             Edit::AddGroup => {
                 self.target = e.add_group();
@@ -221,16 +221,6 @@ impl App {
                 labelled("Encounter id", text_input("bridge-ambush", &e.id).on_input(move |v| edit(Edit::Id(v))).width(240)),
                 labelled("Level", stepper(e.level, 1, 20, move |v| edit(Edit::Level(v)))),
                 labelled("PCs", stepper(e.num_pcs, 1, 99, move |v| edit(Edit::Pcs(v)))),
-                labelled(
-                    "Intended difficulty",
-                    row![
-                        segmented(e.min_difficulty, move |t| edit(Edit::MinDifficulty(t))),
-                        text("to").size(13),
-                        segmented(e.max_difficulty, move |t| edit(Edit::MaxDifficulty(t))),
-                    ]
-                    .spacing(6)
-                    .align_y(Alignment::Center),
-                ),
             ]
             .spacing(16)
             .align_y(Alignment::End)
@@ -264,14 +254,26 @@ impl App {
     fn group_card<'a>(&'a self, doc: &'a Document, g: usize, group: &'a encounter::Group) -> Element<'a, Message> {
         let id = doc.id;
         let edit = move |m: Edit| Message::Edit(id, m);
-        let mut col = column![row![
-            text_input("Group name", &group.name).on_input(move |v| edit(Edit::GroupName(g, v))).size(16),
-            button(text("Remove group").size(12))
-                .style(button::secondary)
-                .on_press_maybe((doc.encounter.groups.len() > 1).then(|| edit(Edit::RemoveGroup(g)))),
+        let mut col = column![
+            row![
+                text_input("Group name", &group.name).on_input(move |v| edit(Edit::GroupName(g, v))).size(16),
+                button(text("Remove group").size(12))
+                    .style(button::secondary)
+                    .on_press_maybe((doc.encounter.groups.len() > 1).then(|| edit(Edit::RemoveGroup(g)))),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+            // Each group aims for its own difficulty.
+            row![
+                text("Intended difficulty").size(12).style(text::secondary),
+                segmented(group.min_difficulty, move |t| edit(Edit::MinDifficulty(g, t))),
+                text("to").size(13),
+                segmented(group.max_difficulty, move |t| edit(Edit::MaxDifficulty(g, t))),
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center)
+            .wrap(),
         ]
-        .spacing(8)
-        .align_y(Alignment::Center)]
         .spacing(10);
 
         col = col.push(self.roster_card(doc, RosterRef { group: g, roster: RosterSel::Base }));
@@ -364,7 +366,8 @@ impl App {
                 Difficulty::OverBudget => text::danger,
                 _ => text::secondary,
             }));
-            let (from, to) = (e.min_difficulty, e.max_difficulty);
+            let group = &e.groups[at.group];
+            let (from, to) = (group.min_difficulty, group.max_difficulty);
             let range = budget.target(from, to);
             let aim = if from == to { from.to_string() } else { format!("{from} to {to}") };
             let (fit, style): (String, fn(&Theme) -> text::Style) = match Fit::of(total, range) {

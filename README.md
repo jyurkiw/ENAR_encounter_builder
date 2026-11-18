@@ -1,16 +1,24 @@
 # Encounter Designer
 
-A desktop app for building Enigma Narrative encounter files (`encounter_schema.xsd`): the app version of the old XP spreadsheet. Pick monsters from your monster folders, drop them into rosters, and see each roster's XP against the target range for its party, worked out from the encounter's intended difficulty.
+A desktop app for building Enigma Narrative encounter files (`encounter_schema.xsd`): the app version of the old XP spreadsheet. Pick monsters from your monster folders, drop them into rosters, and see each roster's XP against the target range for its party, worked out from its group's intended difficulty.
 
 Written in Rust with [iced](https://iced.rs) 0.14.
 
 ## Running it
 
 ```sh
-cargo run
+cargo run             # debug build, then run it
+cargo run --release   # release build, then run it
 ```
 
 The first launch writes a config file with defaults (see **Configuration**).
+
+To build without running:
+
+| Build | Command | Executable |
+|---|---|---|
+| Debug | `cargo build` | `target\debug\encounter-designer.exe` |
+| Release | `cargo build --release` | `target\release\encounter-designer.exe` |
 
 To build both the debug and the release executable in one go (Cargo builds one profile per command):
 
@@ -37,8 +45,9 @@ The window has a ribbon along the top (New, Open, Save, Save All, Configuration)
 
 **Encounter editor.** One tab per open encounter.
 
-- The header sets the encounter id, the party level and number of PCs, and the **intended difficulty**: a range from Low to High (2024 DMG). Each difficulty covers the XP above the budget below it, up to its own: for 5 level-3 PCs, Moderate is 751 to 1,125 XP and Moderate to High is 751 to 2,000.
-- Each **group** has a base roster (for the encounter's party) and any number of **alternate rosters** for other levels and party sizes. "+ Alternate roster" copies the base roster one level up.
+- The header sets the encounter id and the party level and number of PCs.
+- Each **group** has its own **intended difficulty**: a range from Low to High (2024 DMG), set with the buttons under the group's name. Each difficulty covers the XP above the budget below it, up to its own: for 5 level-3 PCs, Moderate is 751 to 1,125 XP and Moderate to High is 751 to 2,000.
+- Each group has a base roster (for the encounter's party) and any number of **alternate rosters** for other levels and party sizes, all measured against the group's difficulty range. "+ Alternate roster" copies the base roster one level up.
 - Each roster lists its monsters with CR, count and XP (read from the monster files), then its total, its rating, and where it stands against its target: "Add 451 – 1,700 XP", "In range · 650 XP to spare" or "225 XP over".
 - Click a roster to make it the one **Add to roster** (in the monster viewer) fills; it's outlined and marked "Adding here". Dragging a monster onto a roster adds it there instead.
 - **Monster references** sets the names the encounter prints for its monsters, and offers to remove references no roster uses.
@@ -66,7 +75,7 @@ Stat block images, their LaTeX and PDF, and the compiler's Python environment li
 
 ## Encounter files
 
-Encounters follow `encounter_schema.xsd` (in enigma-narrative's `schemas/`): an `<encounter>` with `id`, `level`, `numPCs` and the optional `minDifficulty`/`maxDifficulty` (low, moderate or high; default moderate), one or more `<group>`s of rosters, and a `<reference>` block mapping roster ids to monster files. `encounters.xml` is a sample. Saving rewrites the whole file, so XML comments are not kept.
+Encounters follow `encounter_schema.xsd` (in enigma-narrative's `schemas/`): an `<encounter>` with `id`, `level` and `numPCs`, one or more `<group>`s of rosters, each with its own optional `minDifficulty`/`maxDifficulty` (low, moderate or high; default moderate), and a `<reference>` block mapping roster ids to monster files. Files saved before the range moved onto groups have it on `<encounter>`; it's read as the range for every group. `encounters.xml` is a sample. Saving rewrites the whole file, so XML comments are not kept.
 
 ## Tests
 
