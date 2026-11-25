@@ -1,0 +1,52 @@
+# Builds a release encounter-designer.exe whenever a tag is pushed, and attaches
+# it to a GitHub release for that tag (also kept as a workflow artifact).
+#
+#   git tag v0.2.0
+#   git push origin v0.2.0
+#
+# The tests run first; a failing test stops the release.
+
+name: Release
+
+on:
+  push:
+    tags: ['*']
+
+permissions:
+  contents: write   # to create the release and upload the exe
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: Build the exe
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Build release
+        run: cargo build --locked --release
+
+      - name: Name the exe after the tag
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target/release/encounter-designer.exe "dist/encounter-designer-${{ github.ref_name }}.exe"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: encounter-designer-${{ github.ref_name }}
+          path: dist/*.exe
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.exe
+          generate_release_notes: true

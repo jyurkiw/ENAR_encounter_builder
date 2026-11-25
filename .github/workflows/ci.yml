@@ -1,0 +1,46 @@
+# Builds and tests the Encounter Designer on every push and pull request.
+#
+# Windows only: the app is a Windows program (build.rs embeds the .exe icon,
+# the compiler is started with CREATE_NO_WINDOW). The headless UI tests use the
+# tiny-skia CPU renderer (.cargo/config.toml), so they need no GPU.
+#
+# Tests marked #[ignore] (the real encompile compiler) don't run here: the
+# runner has no compiler or resource folder.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Build and test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --locked --all-targets
+
+      - name: Test
+        run: cargo test --locked
+
+      # Reported as annotations on the run, but doesn't fail it.
+      - name: Clippy
+        run: cargo clippy --locked --all-targets
