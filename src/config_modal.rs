@@ -297,15 +297,20 @@ impl ConfigEditor {
         ]
         .spacing(4);
 
-        let footer = row![
+        // The config file's path gets a line of its own: beside the buttons, a
+        // long path took the row and squeezed Save to nothing.
+        let footer = column![
             text(self.file_path.display().to_string()).size(11).style(text::secondary),
-            space::horizontal(),
-            button("Restore defaults").style(button::secondary).on_press(Msg::Defaults),
-            button("Cancel").style(button::secondary).on_press(Msg::Cancel),
-            button("Save").on_press(Msg::Save),
+            row![
+                space::horizontal(),
+                button("Restore defaults").style(button::secondary).on_press(Msg::Defaults),
+                button("Cancel").style(button::secondary).on_press(Msg::Cancel),
+                button("Save").on_press(Msg::Save),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
         ]
-        .spacing(8)
-        .align_y(Alignment::Center);
+        .spacing(8);
 
         let compiler = column![
             text("Stat block compiler (encompile) folder").size(14),

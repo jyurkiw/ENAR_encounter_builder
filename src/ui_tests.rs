@@ -680,6 +680,15 @@ fn compiler_folder_is_set_in_configuration() {
 }
 
 #[test]
+fn a_long_config_file_path_leaves_room_for_save() {
+    let mut h = Harness::new();
+    h.app.config_path = PathBuf::from(format!(r"C:\Users\{}\AppData\Roaming\encounter-designer\config.toml", "a-long-user-name-".repeat(6)));
+    h.click("Configuration");
+    h.click("Save");
+    assert!(h.app.config_editor.is_none());
+}
+
+#[test]
 fn a_stat_block_in_several_column_pieces_shows_them_all_in_order() {
     let mut h = Harness::new();
     h.app.renderer = statblock::Renderer::Fake(Arc::new(|_: &statblock::Request, out: &Path| {
