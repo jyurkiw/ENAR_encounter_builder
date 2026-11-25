@@ -3,6 +3,8 @@ mod config_modal;
 mod dialogs;
 mod editor;
 mod encounter;
+mod export_modal;
+mod foundry;
 mod monsters;
 mod statblock;
 mod xp;
@@ -77,6 +79,8 @@ struct Document {
     dirty: bool,
     /// The roster "Add to roster" puts monsters in.
     target: encounter::RosterRef,
+    /// Roster rows (roster, row) whose local name fields are open.
+    local_names_open: HashSet<(encounter::RosterRef, usize)>,
 }
 
 impl Document {
@@ -150,6 +154,9 @@ struct App {
     dragging: Option<Divider>,
 
     config_editor: Option<ConfigEditor>,
+    /// The Export to Foundry modal, while it's open.
+    export: Option<export_modal::ExportDialog>,
+    exporter: foundry::Exporter,
     /// A monster being dragged from the browser, from the press on its row.
     drag: Option<Drag>,
     /// The roster under the cursor (for dropping a dragged monster).
@@ -176,9 +183,14 @@ enum Message {
     SelectDoc(u64),
     CloseDoc(u64),
     Shortcut(Shortcut),
+    /// Tab (or Shift+Tab, `back`): focus the next (previous) text input.
+    FocusMove { back: bool },
 
     OpenConfig,
     Config(config_modal::Msg),
+    /// Opens the Export to Foundry modal for the active encounter.
+    OpenExport,
+    Export(export_modal::Msg),
 
     ToggleLhs(LhsTab),
     DividerPressed(Divider),
@@ -252,6 +264,8 @@ impl App {
             window_width: INITIAL_SIZE.width,
             dragging: None,
             config_editor: None,
+            export: None,
+            exporter: foundry::Exporter::default(),
             drag: None,
             drop_hover: None,
             status: None,
@@ -287,7 +301,14 @@ impl App {
     fn add_doc(&mut self, path: Option<PathBuf>, encounter: Encounter, dirty: bool) {
         let id = self.next_doc_id;
         self.next_doc_id += 1;
-        self.docs.push(Document { id, path, encounter, dirty, target: encounter::RosterRef::FIRST });
+        self.docs.push(Document {
+            id,
+            path,
+            encounter,
+            dirty,
+            target: encounter::RosterRef::FIRST,
+            local_names_open: HashSet::new(),
+        });
         self.active_doc = Some(id);
     }
 
@@ -416,7 +437,7 @@ impl App {
                 }
             }
             Message::Shortcut(s) => {
-                if self.config_editor.is_none() {
+                if self.config_editor.is_none() && self.export.is_none() {
                     let msg = match s {
                         Shortcut::New => Message::New,
                         Shortcut::Open => Message::Open,
@@ -427,6 +448,13 @@ impl App {
                 }
             }
 
+            Message::FocusMove { back } => {
+                return if back {
+                    iced::widget::operation::focus_previous()
+                } else {
+                    iced::widget::operation::focus_next()
+                };
+            }
             Message::OpenConfig => {
                 self.config_editor =
                     Some(ConfigEditor::new(&self.config, self.dialogs.clone(), self.config_path.clone()));
@@ -450,6 +478,18 @@ impl App {
                     }
                 }
             }
+
+            Message::OpenExport => {
+                if let Some(doc) = self.active() {
+                    let plan = foundry::plan(&doc.encounter, &self.config);
+                    self.export = Some(export_modal::ExportDialog::new(
+                        doc.encounter.id.clone(),
+                        plan,
+                        self.config.foundry_export_dir.clone(),
+                    ));
+                }
+            }
+            Message::Export(msg) => return self.update_export(msg),
 
             Message::ToggleLhs(tab) => {
                 self.lhs = if self.lhs == Some(tab) { None } else { Some(tab) };
@@ -579,14 +619,79 @@ impl App {
         Task::none()
     }
 
+    fn update_export(&mut self, msg: export_modal::Msg) -> Task<Message> {
+        use export_modal::{Msg, State};
+        let Some(export) = &mut self.export else {
+            return Task::none();
+        };
+        match msg {
+            Msg::Folder(v) => export.folder = v,
+            Msg::Browse => {
+                let start = match export.folder.trim() {
+                    "" => PathBuf::from(&self.config.resource_dir),
+                    f => self.config.resolve(f),
+                };
+                return Task::perform(self.dialogs.pick_folder(start), |p| Message::Export(Msg::Browsed(p)));
+            }
+            Msg::Browsed(None) => {}
+            Msg::Browsed(Some(path)) => export.folder = self.config.to_res_path(&path),
+            Msg::Export => {
+                if !export.can_export() {
+                    return Task::none();
+                }
+                export.state = State::Running;
+                let folder = export.folder.trim().to_string();
+                let job = foundry::Job {
+                    out: self.config.resolve(&folder),
+                    root: PathBuf::from(&self.config.resource_dir),
+                    actors: export.plan.actors.clone(),
+                    compiler_dir: self.config.resolve(&self.config.compiler_dir),
+                    uv_command: self.config.uv_command.clone(),
+                    cache_root: self.cache_root.clone(),
+                };
+                // The next export starts in the same folder.
+                if self.config.foundry_export_dir != folder {
+                    self.config.foundry_export_dir = folder;
+                    if let Err(e) = self.config.save_to(&self.config_path) {
+                        self.set_status(e, true);
+                    }
+                }
+                return Task::perform(foundry::export(self.exporter.clone(), job), |r| {
+                    Message::Export(Msg::Done(r))
+                });
+            }
+            Msg::Done(result) => {
+                let folder = export.folder.trim().to_string();
+                let (text, is_error) = match &result {
+                    Ok(r) if r.errors.is_empty() => {
+                        (format!("Exported {} Foundry actors to {folder}", r.written.len()), false)
+                    }
+                    Ok(r) => (
+                        format!(
+                            "Exported {} Foundry actors to {folder}; {} couldn't be",
+                            r.written.len(),
+                            r.errors.len()
+                        ),
+                        true,
+                    ),
+                    Err(_) => ("The Foundry export failed".to_string(), true),
+                };
+                export.state = State::Done(result);
+                self.set_status(text, is_error);
+            }
+            Msg::Back => export.state = State::Ready,
+            Msg::Close => {
+                if !matches!(export.state, State::Running) {
+                    self.export = None;
+                }
+            }
+        }
+        Task::none()
+    }
+
     fn subscription(&self) -> Subscription<Message> {
         let resize = window::resize_events().map(|(_, size)| Message::WindowResized(size));
-        let keys = event::listen_with(|event, _, _| match event {
-            Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
-                shortcut_for(&key, modifiers).map(Message::Shortcut)
-            }
-            _ => None,
-        });
+        let keys = event::listen_with(|event, status, _| key_message(event, status));
         let mut subs = vec![resize, keys];
         if self.drag.is_some() {
             // Follow the pressed monster anywhere in the window, so letting go
@@ -666,30 +771,35 @@ impl App {
         if let Some(status) = &self.status {
             page = page.push(self.status_bar(status));
         }
-        let mut page: Element<_> = page.into();
-
-        // The dragged monster's name, following the cursor.
-        if let Some(Drag { active: true, cursor: Some(p), file, monster, .. }) = &self.drag {
-            let name = self
-                .sources
-                .iter()
-                .flat_map(|s| &s.files)
-                .filter(|f| &f.path == file)
-                .flat_map(|f| &f.monsters)
-                .find(|m| &m.id == monster)
-                .map(|m| m.label())
-                .unwrap_or_else(|| monster.clone());
-            let hint = if self.drop_hover.is_some() { "Release to add" } else { "Drop on a roster" };
-            let ghost = container(column![text(name).size(13), text(hint).size(11).style(text::secondary)])
-                .padding([4, 10])
-                .style(container::bordered_box);
-            page = iced::widget::stack![page, iced::widget::pin(ghost).position(*p + iced::Vector::new(14.0, 10.0))].into();
-        }
-
-        match &self.config_editor {
-            Some(editor) => ui::modal(page, editor.view().map(Message::Config)),
-            None => page,
-        }
+        // The page is always the first layer of the same stack, with the
+        // dragged monster and any modal over it (or empty layers), so
+        // starting a drag or opening a modal doesn't rebuild the page's
+        // widget tree and lose its scroll positions.
+        let ghost: Element<_> = match &self.drag {
+            Some(Drag { active: true, cursor: Some(p), file, monster, .. }) => {
+                let name = self
+                    .sources
+                    .iter()
+                    .flat_map(|s| &s.files)
+                    .filter(|f| &f.path == file)
+                    .flat_map(|f| &f.monsters)
+                    .find(|m| &m.id == monster)
+                    .map(|m| m.label())
+                    .unwrap_or_else(|| monster.clone());
+                let hint = if self.drop_hover.is_some() { "Release to add" } else { "Drop on a roster" };
+                let ghost = container(column![text(name).size(13), text(hint).size(11).style(text::secondary)])
+                    .padding([4, 10])
+                    .style(container::bordered_box);
+                iced::widget::pin(ghost).position(*p + iced::Vector::new(14.0, 10.0)).into()
+            }
+            _ => space().into(),
+        };
+        let modal: Element<_> = match (&self.config_editor, &self.export) {
+            (Some(editor), _) => ui::modal_layer(editor.view().map(Message::Config)),
+            (None, Some(export)) => ui::modal_layer(export.view().map(Message::Export)),
+            (None, None) => space().into(),
+        };
+        iced::widget::stack![page, ghost, modal].into()
     }
 
     fn ribbon(&self) -> Element<'_, Message> {
@@ -703,6 +813,8 @@ impl App {
                 btn("Open", Some(Message::Open)),
                 btn("Save", has_doc.then_some(Message::Save)),
                 btn("Save All", (!self.docs.is_empty()).then_some(Message::SaveAll)),
+                rule::vertical(1),
+                btn("Export to Foundry", has_doc.then_some(Message::OpenExport)),
                 rule::vertical(1),
                 btn("Configuration", Some(Message::OpenConfig)),
             ]
@@ -1028,6 +1140,22 @@ impl App {
         .padding([2, 8])
         .width(Length::Fill)
         .into()
+    }
+}
+
+/// What a key press does: a shortcut, or Tab moving focus between text
+/// inputs (which leave Tab alone, so it arrives ignored).
+fn key_message(event: Event, status: event::Status) -> Option<Message> {
+    match event {
+        Event::Keyboard(keyboard::Event::KeyPressed {
+            key: keyboard::Key::Named(keyboard::key::Named::Tab),
+            modifiers,
+            ..
+        }) => (status == event::Status::Ignored).then_some(Message::FocusMove { back: modifiers.shift() }),
+        Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
+            shortcut_for(&key, modifiers).map(Message::Shortcut)
+        }
+        _ => None,
     }
 }
 

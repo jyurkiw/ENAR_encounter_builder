@@ -27,6 +27,10 @@ struct Harness {
     last_request: Arc<Mutex<Option<statblock::Request>>>,
     /// Where the (simulated) mouse is, during drags.
     cursor: Option<iced::Point>,
+    /// The last Foundry export the fake exporter ran.
+    last_export: Arc<Mutex<Option<foundry::Job>>>,
+    /// When set, the fake exporter fails with this message.
+    export_error: Arc<Mutex<Option<String>>>,
 }
 
 impl Harness {
@@ -85,7 +89,38 @@ impl Harness {
             })
         });
 
-        let mut h = Harness { app, dialogs, root, renders, render_error, last_request, cursor: None };
+        // Foundry exports come from a fake that writes "{}" per actor.
+        let last_export = Arc::new(Mutex::new(None::<foundry::Job>));
+        let export_error = Arc::new(Mutex::new(None::<String>));
+        app.exporter = foundry::Exporter::Fake({
+            let (last_export, export_error) = (last_export.clone(), export_error.clone());
+            Arc::new(move |job: &foundry::Job| {
+                *last_export.lock().unwrap() = Some(job.clone());
+                if let Some(e) = export_error.lock().unwrap().clone() {
+                    return Err(e);
+                }
+                let mut report = foundry::Report::default();
+                for a in &job.actors {
+                    let path = job.out.join(&a.out);
+                    fs::write(&path, "{}").map_err(|e| e.to_string())?;
+                    report.written.push(path);
+                }
+                report.warnings.push("Aboleth: a warning from the compiler".into());
+                Ok(report)
+            })
+        });
+
+        let mut h = Harness {
+            app,
+            dialogs,
+            root,
+            renders,
+            render_error,
+            last_request,
+            cursor: None,
+            last_export,
+            export_error,
+        };
         h.run(boot);
         h
     }
@@ -162,10 +197,11 @@ impl Harness {
     /// Types into a text input. Each key goes through a fresh render, as
     /// it would in the running app, since an input's value only changes
     /// once `update` has run.
-    fn type_into(&mut self, id: &'static str, text: &str) {
+    fn type_into(&mut self, id: impl Into<String>, text: &str) {
+        let id: String = id.into();
         for ch in text.chars() {
             self.interact(|ui| {
-                ui.click(iced::widget::Id::from(id)).unwrap_or_else(|e| panic!("no input {id}: {e:?}"));
+                ui.click(iced::widget::Id::from(id.clone())).unwrap_or_else(|e| panic!("no input {id}: {e:?}"));
                 let _ = ui.tap_key(Key::Named(Named::End));
                 let _ = ui.typewrite(&ch.to_string());
             });
@@ -707,7 +743,7 @@ fn add_to_roster_puts_the_viewed_monster_in_the_encounter() {
     h.assert_shows("Rated Over the High budget");
     h.assert_shows("5,600 XP over"); // the Moderate target tops out at 300
     let e = &h.doc().encounter;
-    assert_eq!(e.groups[0].base_roster, vec![encounter::RosterEntry { id: "aboleth".into(), count: 1 }]);
+    assert_eq!(e.groups[0].base_roster, vec![encounter::RosterEntry::new("aboleth", 1)]);
     assert_eq!(e.references[0].file, "res://srd/aboleth.xml");
     assert_eq!(e.references[0].monster, "aboleth");
     assert!(h.doc().dirty);
@@ -827,7 +863,7 @@ fn the_edited_encounter_saves_to_xml() {
     assert_eq!(saved, h.doc().encounter);
     assert_eq!(saved.id, "deep-trouble");
     assert_eq!(saved.groups[0].name, "The Pool");
-    assert_eq!(saved.groups[0].base_roster[1], encounter::RosterEntry { id: "bandit-deadeye".into(), count: 2 });
+    assert_eq!(saved.groups[0].base_roster[1], encounter::RosterEntry::new("bandit-deadeye", 2));
     assert_eq!(saved.references[1].file, "res://monsters/bandits.xml");
     assert!(!h.doc().dirty);
 }
@@ -1094,7 +1130,7 @@ fn dragging_a_monster_onto_a_roster_adds_it() {
     h.release();
 
     let e = &h.doc().encounter;
-    assert_eq!(e.groups[0].base_roster, vec![encounter::RosterEntry { id: "aboleth".into(), count: 1 }]);
+    assert_eq!(e.groups[0].base_roster, vec![encounter::RosterEntry::new("aboleth", 1)]);
     assert_eq!(e.references[0].file, "res://srd/aboleth.xml");
     assert!(h.doc().dirty);
     assert!(h.app.drag.is_none());
@@ -1278,4 +1314,639 @@ fn each_group_has_its_own_intended_difficulty() {
     assert_eq!(h.doc().encounter.groups[0].max_difficulty, xp::Tier::High); // unchanged
     h.click_nth("Low", 1); // Group 1's "from" Low: already Low
     assert_eq!(h.doc().encounter.groups[1].min_difficulty, xp::Tier::Moderate);
+}
+
+// ----- local names -----------------------------------------------------------------
+
+#[test]
+fn local_names_open_fields_under_the_row() {
+    let mut h = Harness::new_with_aboleth();
+    let display = editor::local_input_id("display", BASE, 0);
+    assert!(sim(h.app.view(), h.app.window_width).find(iced::widget::Id::from(display.clone())).is_err());
+    h.click("Local names");
+    assert!(sim(h.app.view(), h.app.window_width).find(iced::widget::Id::from(display)).is_ok());
+    let before = h.doc().encounter.clone();
+    h.click("Local names"); // and closes them again
+    assert_eq!(h.doc().encounter, before); // only showing fields: no change to the file
+}
+
+#[test]
+fn a_local_display_name_renames_the_monster_in_that_roster_only() {
+    let mut h = Harness::new_with_aboleth();
+    h.click("+ Alternate roster"); // a copy listing the Aboleth too
+    h.click_nth("Local names", 1); // the base roster's row
+    h.type_into(editor::local_input_id("display", BASE, 0), "Deep Lurker");
+    h.type_into(editor::local_input_id("short", BASE, 0), "Lurker");
+    h.assert_shows("Deep Lurker"); // the base roster's display field
+    h.assert_shows("Aboleth"); // the alternate roster's row keeps the name
+    h.assert_shows("Aboleth (CR 10)"); // and so does the reference
+    let entry = &h.doc().encounter.groups[0].base_roster[0];
+    assert_eq!((entry.display_name.as_deref(), entry.short_name.as_deref()), (Some("Deep Lurker"), Some("Lurker")));
+    assert_eq!(h.doc().encounter.groups[0].alt_rosters[0].monsters[0].display_name, None);
+    assert!(h.doc().dirty);
+
+    // Closed again, the name shows and the button says it has local names.
+    h.click_nth("Local names", 1);
+    h.assert_shows("Local names •");
+    assert_eq!(h.app.rows(&h.doc().encounter, BASE)[0].name, "Deep Lurker");
+}
+
+#[test]
+fn local_names_beat_the_references_display_name() {
+    let mut h = Harness::new_with_aboleth();
+    h.edit(editor::Edit::DisplayName(0, "Elder Aboleth".into()));
+    h.assert_shows("Elder Aboleth");
+    h.edit(editor::Edit::LocalDisplayName(BASE, 0, "Pool Warden".into()));
+    // The row's name. (On screen "Elder Aboleth" stays as the reference
+    // field's value, which a text selector also matches.)
+    let row_name = |h: &Harness| h.app.rows(&h.doc().encounter, BASE)[0].name.clone();
+    assert_eq!(row_name(&h), "Pool Warden");
+    h.assert_shows("Pool Warden");
+    assert_eq!(h.doc().encounter.references[0].display_name.as_deref(), Some("Elder Aboleth"));
+    h.edit(editor::Edit::LocalDisplayName(BASE, 0, String::new())); // blank: back to the reference's
+    assert_eq!(h.doc().encounter.groups[0].base_roster[0].display_name, None);
+    assert_eq!(row_name(&h), "Elder Aboleth");
+}
+
+#[test]
+fn local_names_are_saved_on_the_roster_monster() {
+    let mut h = Harness::new_with_aboleth();
+    h.edit(editor::Edit::LocalDisplayName(BASE, 0, "Pool Warden".into()));
+    h.edit(editor::Edit::LocalShortName(BASE, 0, "Warden".into()));
+    let out = h.root.path().join("local.xml");
+    h.dialogs.answer(vec![out.clone()]);
+    h.click("Save");
+    let text = fs::read_to_string(&out).unwrap();
+    assert!(text.contains(r#"<monster id="aboleth" displayName="Pool Warden" shortName="Warden"/>"#), "{text}");
+    h.click("×");
+    h.dialogs.answer(vec![out]);
+    h.click("Open");
+    h.assert_shows("Pool Warden");
+    h.assert_shows("Local names •");
+}
+
+#[test]
+fn the_local_names_button_keeps_rows_the_same_height() {
+    // The button sits beside the name in small type; a row with it is no
+    // taller than the count stepper that sets the row's height.
+    let h = Harness::new_with_aboleth();
+    let mut ui = sim(h.app.view(), h.app.window_width);
+    let height = |ui: &mut iced_test::Simulator<'_, Message>, text: &str| {
+        let target = ui.find(text).unwrap_or_else(|e| panic!("no {text:?}: {e:?}"));
+        target.visible_bounds().unwrap_or_else(|| panic!("{text:?} isn't visible")).height
+    };
+    let local = height(&mut ui, "Local names");
+    let name = height(&mut ui, "Aboleth");
+    assert!(local < name, "Local names ({local}) should be shorter than the name ({name})");
+}
+
+#[test]
+fn local_name_fields_sit_on_the_monsters_own_line() {
+    let mut h = Harness::new_with_aboleth();
+    let mut ui = sim(h.app.view(), h.app.window_width);
+    let closed_height = row_height(&mut ui);
+    drop(ui);
+
+    h.click("Local names");
+    let mut ui = sim(h.app.view(), h.app.window_width);
+    let centre_y = |ui: &mut iced_test::Simulator<'_, Message>, id: String| {
+        ui.find(iced::widget::Id::from(id)).unwrap().bounds().center_y()
+    };
+    // Open, the fields take the name's place: they line up with the row's CR.
+    let row_y = {
+        let target = ui.find("10").unwrap();
+        target.visible_bounds().unwrap().center_y()
+    };
+    for kind in ["display", "short"] {
+        let y = centre_y(&mut ui, editor::local_input_id(kind, BASE, 0));
+        assert!((y - row_y).abs() < 4.0, "the {kind} field ({y}) isn't on the row's line ({row_y})");
+    }
+    // And the row is no taller with them open.
+    assert!(row_height(&mut ui) <= closed_height + 1.0);
+}
+
+/// The distance from the roster's "Monster" header to its total line: the
+/// height its one row takes.
+fn row_height(ui: &mut iced_test::Simulator<'_, Message>) -> f32 {
+    let y = |ui: &mut iced_test::Simulator<'_, Message>, text: &str| {
+        ui.find(text).unwrap().visible_bounds().unwrap().y
+    };
+    y(ui, "Total 5,900 XP") - y(ui, "Monster")
+}
+
+// ----- the same stat block more than once ----------------------------------------
+
+#[test]
+fn add_named_copy_lists_the_stat_block_again_and_needs_names() {
+    let mut h = Harness::new_with_aboleth();
+    h.click("Add named copy");
+    let roster = &h.doc().encounter.groups[0].base_roster;
+    assert_eq!(roster.len(), 2);
+    assert_eq!(roster[0].id, roster[1].id);
+    assert!(h.doc().dirty);
+    // Both rows need a name: flagged, with their fields open.
+    h.assert_shows("Local name needed");
+    for row in 0..2 {
+        let id = editor::local_input_id("display", BASE, row);
+        assert!(sim(h.app.view(), h.app.window_width).find(iced::widget::Id::from(id)).is_ok(), "row {row} closed");
+    }
+    h.assert_shows("⚠ Group 1: the base roster lists aboleth more than once; each needs its own local display name.");
+    h.assert_shows("Total 11,800 XP"); // both count
+
+    h.type_into(editor::local_input_id("display", BASE, 0), "Elder");
+    h.type_into(editor::local_input_id("display", BASE, 1), "Younger");
+    h.assert_hides("Local name needed");
+    h.assert_hides("⚠ Group 1: the base roster lists aboleth more than once; each needs its own local display name.");
+}
+
+#[test]
+fn a_required_name_stays_open_while_typing() {
+    let mut h = Harness::new_with_aboleth();
+    h.click("Add named copy");
+    // The first letter makes row 0 no longer required; it mustn't close.
+    h.type_into(editor::local_input_id("display", BASE, 0), "Elder");
+    assert_eq!(h.doc().encounter.groups[0].base_roster[0].display_name.as_deref(), Some("Elder"));
+}
+
+#[test]
+fn repeated_stat_blocks_need_different_names() {
+    let mut h = Harness::new_with_aboleth();
+    h.click("Add named copy");
+    h.edit(editor::Edit::LocalDisplayName(BASE, 0, "Twin".into()));
+    h.edit(editor::Edit::LocalDisplayName(BASE, 1, "Twin".into()));
+    h.assert_shows("⚠ Group 1: the base roster has two aboleth named \"Twin\".");
+}
+
+#[test]
+fn named_copies_save_as_separate_roster_monsters() {
+    let mut h = Harness::new_with_aboleth();
+    h.click("Add named copy");
+    h.edit(editor::Edit::LocalDisplayName(BASE, 0, "Elder".into()));
+    h.edit(editor::Edit::LocalDisplayName(BASE, 1, "Younger".into()));
+    let out = h.root.path().join("twins.xml");
+    h.dialogs.answer(vec![out.clone()]);
+    h.click("Save");
+    let text = fs::read_to_string(&out).unwrap();
+    assert!(text.contains(r#"<monster id="aboleth" displayName="Elder"/>"#), "{text}");
+    assert!(text.contains(r#"<monster id="aboleth" displayName="Younger"/>"#), "{text}");
+    assert_eq!(Encounter::parse(&text).unwrap(), h.doc().encounter);
+}
+
+#[test]
+fn adding_again_counts_up_the_unnamed_entry_not_a_named_one() {
+    let mut h = Harness::new_with_aboleth();
+    h.click("Add named copy");
+    h.edit(editor::Edit::LocalDisplayName(BASE, 1, "Younger".into()));
+    h.click("Add to roster"); // the Aboleth is still in the viewer
+    let roster = &h.doc().encounter.groups[0].base_roster;
+    assert_eq!((roster[0].count, roster[1].count), (2, 1));
+}
+
+#[test]
+fn removing_a_row_keeps_the_other_rows_fields_where_they_were() {
+    let mut h = Harness::new_with_aboleth();
+    h.click("Goblin (CR 1/4)");
+    h.click("Add to roster"); // row 1: goblin
+    h.edit(editor::Edit::ToggleLocalNames(BASE, 1));
+    h.edit(editor::Edit::RemoveRow(BASE, 0));
+    // The goblin is row 0 now, and its fields are still open.
+    assert!(h.doc().local_names_open.contains(&(BASE, 0)));
+    assert!(!h.doc().local_names_open.contains(&(BASE, 1)));
+}
+
+// ----- Foundry export ---------------------------------------------------------
+
+impl Harness {
+    fn last_export(&self) -> Option<foundry::Job> {
+        self.last_export.lock().unwrap().clone()
+    }
+
+    /// Two Aboleths with their own names (one with a short name) and a goblin.
+    fn new_with_named_aboleths() -> Self {
+        let mut h = Harness::new_with_aboleth();
+        h.click("Add named copy");
+        h.edit(editor::Edit::LocalDisplayName(BASE, 0, "Elder".into()));
+        h.edit(editor::Edit::LocalDisplayName(BASE, 1, "Younger".into()));
+        h.edit(editor::Edit::LocalShortName(BASE, 1, "Pup".into()));
+        h.click("Goblin (CR 1/4)");
+        h.click("Add to roster");
+        h
+    }
+}
+
+#[test]
+fn export_needs_an_open_encounter() {
+    let mut h = Harness::new();
+    h.click("Export to Foundry"); // disabled: nothing happens
+    assert!(h.app.export.is_none());
+    h.click("New");
+    h.click("Export to Foundry");
+    assert!(h.app.export.is_some());
+}
+
+#[test]
+fn export_lists_a_file_per_name() {
+    let mut h = Harness::new_with_named_aboleths();
+    h.click("Export to Foundry");
+    h.assert_shows("Elder");
+    h.assert_shows("Younger (token: Pup)");
+    h.assert_shows("fvtt-Actor-aboleth-elder.json");
+    h.assert_shows("fvtt-Actor-aboleth-younger.json");
+    h.assert_shows("fvtt-Actor-goblin.json");
+    let plan = &h.app.export.as_ref().unwrap().plan;
+    assert_eq!(plan.actors.len(), 3);
+    assert_eq!(plan.actors[0].file, h.res("srd/aboleth.xml"));
+}
+
+#[test]
+fn export_writes_to_the_browsed_folder_and_remembers_it() {
+    let mut h = Harness::new_with_named_aboleths();
+    h.click("Export to Foundry");
+    h.click("Okay"); // no folder yet: disabled
+    assert!(h.last_export().is_none());
+
+    let out = h.root.path().join("foundry").join("bridge"); // doesn't exist yet
+    h.dialogs.answer(vec![out.clone()]);
+    h.click("Browse…");
+    h.click("Okay");
+
+    let job = h.last_export().expect("an export ran");
+    assert_eq!(job.out, out);
+    assert!(out.join("fvtt-Actor-aboleth-elder.json").is_file()); // the folder was made
+    let names: Vec<_> = job.actors.iter().map(|a| (a.name.as_deref(), a.token.as_deref())).collect();
+    assert_eq!(names, vec![(Some("Elder"), None), (Some("Younger"), Some("Pup")), (None, None)]);
+    assert_eq!(job.compiler_dir, h.app.config.resolve(&h.app.config.compiler_dir));
+
+    let shown = h.app.config.to_res_path(&out);
+    h.assert_shows(&format!("Wrote 3 files to {shown}"));
+    h.assert_shows("1 warning");
+    h.assert_shows("Aboleth: a warning from the compiler");
+    h.assert_shows(&format!("Exported 3 Foundry actors to {shown}"));
+
+    // The folder is saved in the config file, and the next export starts there.
+    let saved = fs::read_to_string(h.root.path().join("config.toml")).unwrap();
+    assert!(saved.contains("foundry_export_dir"), "{saved}");
+    h.click("Close");
+    assert!(h.app.export.is_none());
+    h.click("Export to Foundry");
+    assert_eq!(h.app.export.as_ref().unwrap().folder, shown);
+}
+
+#[test]
+fn export_folder_can_be_typed_as_a_res_path() {
+    let mut h = Harness::new_with_aboleth();
+    h.click("Export to Foundry");
+    h.type_into(export_modal::FOLDER_INPUT, "res://foundry");
+    h.click("Okay");
+    assert_eq!(h.last_export().unwrap().out, h.res("foundry"));
+    assert!(h.res("foundry/fvtt-Actor-aboleth.json").is_file());
+}
+
+#[test]
+fn a_failed_export_says_why_and_goes_back() {
+    let mut h = Harness::new_with_aboleth();
+    *h.export_error.lock().unwrap() = Some("No encompile compiler in x.".into());
+    h.click("Export to Foundry");
+    h.type_into(export_modal::FOLDER_INPUT, "res://foundry");
+    h.click("Okay");
+    h.assert_shows("The export failed");
+    h.assert_shows("No encompile compiler in x.");
+    h.click("Back");
+    h.assert_shows("Okay");
+    h.click("Cancel");
+    assert!(h.app.export.is_none());
+}
+
+#[test]
+fn export_lists_roster_monsters_without_a_reference() {
+    let mut h = Harness::new_with_aboleth();
+    let id = h.doc().id;
+    h.app.docs.iter_mut().find(|d| d.id == id).unwrap().encounter.groups[0]
+        .base_roster
+        .push(encounter::RosterEntry::new("ghost", 1));
+    h.click("Export to Foundry");
+    h.assert_shows("⚠ ghost has no reference, so it isn't exported.");
+    assert_eq!(h.app.export.as_ref().unwrap().plan.actors.len(), 1); // the aboleth still goes
+}
+
+#[test]
+fn shortcuts_wait_while_the_export_modal_is_open() {
+    let mut h = Harness::new_with_aboleth();
+    h.click("Export to Foundry");
+    h.send(Message::Shortcut(Shortcut::New));
+    assert_eq!(h.app.docs.len(), 1);
+}
+
+#[test]
+fn the_export_modal_fits_a_narrow_window() {
+    for width in [800.0, 1000.0] {
+        let mut h = Harness::new_with_named_aboleths();
+        h.app.window_width = width;
+        h.click("Export to Foundry");
+        h.type_into(export_modal::FOLDER_INPUT, "res://f");
+        h.click("Okay");
+        assert!(h.last_export().is_some(), "Okay couldn't be clicked at {width}px");
+    }
+}
+
+// ----- widget state across renders ---------------------------------------------
+
+/// Renders the app like the real window does: one widget tree, kept (as a
+/// cache) from one view to the next, so scroll positions carry over unless
+/// a view change rebuilds the tree. (The simulator starts fresh each time.)
+struct Window {
+    renderer: iced_test::renderer::Renderer,
+    cache: Option<iced_test::runtime::user_interface::Cache>,
+}
+
+impl Window {
+    fn new() -> Self {
+        use iced_test::core::renderer::Headless;
+        let backend = std::env::var("ICED_TEST_BACKEND").ok();
+        let renderer = futures::executor::block_on(iced_test::renderer::Renderer::new(
+            iced::Font::with_name("Fira Sans"),
+            iced::Pixels(16.0),
+            backend.as_deref(),
+        ))
+        .expect("a headless renderer");
+        Window { renderer, cache: Some(Default::default()) }
+    }
+
+    /// Renders the current view, gives it `events` with the cursor at
+    /// `cursor`, and returns the editor's scroll offset afterwards.
+    fn render(&mut self, app: &App, cursor: iced::Point, events: &[Event]) -> f32 {
+        let _ = self.update(app, cursor, events);
+        let mut offset = ScrollOffset(iced::widget::Id::from(editor::EDITOR_SCROLL), None);
+        self.operate(app, &mut offset);
+        offset.1.expect("the editor's scrollable")
+    }
+
+    /// Renders the current view and gives it `events`; returns the messages.
+    fn update(&mut self, app: &App, cursor: iced::Point, events: &[Event]) -> Vec<Message> {
+        self.update_with_status(app, cursor, events).0
+    }
+
+    /// Like `update`, also returning whether the widgets captured each event.
+    fn update_with_status(
+        &mut self,
+        app: &App,
+        cursor: iced::Point,
+        events: &[Event],
+    ) -> (Vec<Message>, Vec<event::Status>) {
+        let mut ui = iced_test::runtime::UserInterface::build(
+            app.view(),
+            INITIAL_SIZE,
+            self.cache.take().unwrap(),
+            &mut self.renderer,
+        );
+        let mut messages = Vec::new();
+        let (_, statuses) = ui.update(
+            events,
+            mouse::Cursor::Available(cursor),
+            &mut self.renderer,
+            &mut iced_test::core::clipboard::Null,
+            &mut messages,
+        );
+        self.cache = Some(ui.into_cache());
+        (messages, statuses)
+    }
+
+    /// Runs an operation over the current view's widgets.
+    fn operate(&mut self, app: &App, op: &mut dyn iced_test::core::widget::Operation) {
+        let mut ui = iced_test::runtime::UserInterface::build(
+            app.view(),
+            INITIAL_SIZE,
+            self.cache.take().unwrap(),
+            &mut self.renderer,
+        );
+        ui.operate(&self.renderer, op);
+        self.cache = Some(ui.into_cache());
+    }
+
+    /// Runs an operation and whatever it chains into (focus_next counts
+    /// the focusable widgets first, then focuses one), as the runtime does.
+    fn operate_chained(&mut self, app: &App, op: impl iced_test::core::widget::Operation + 'static) {
+        use iced_test::core::widget::operation::Outcome;
+        let mut op: Box<dyn iced_test::core::widget::Operation> = Box::new(op);
+        loop {
+            self.operate(app, op.as_mut());
+            match op.finish() {
+                Outcome::Chain(next) => op = next,
+                _ => break,
+            }
+        }
+    }
+
+    /// Where the widget with this id is, and whether it has focus.
+    fn find(&mut self, app: &App, id: &str) -> Option<(iced::Rectangle, bool)> {
+        let mut op = FindInput(iced::widget::Id::from(id.to_string()), None);
+        self.operate(app, &mut op);
+        op.1
+    }
+
+    /// The id of the focused text input, if any.
+    fn focused(&mut self, app: &App) -> Option<String> {
+        let mut op = Focused(None);
+        self.operate(app, &mut op);
+        op.0
+    }
+}
+
+/// Finds a focusable widget's bounds and focus.
+struct FindInput(iced::widget::Id, Option<(iced::Rectangle, bool)>);
+
+impl iced_test::core::widget::Operation for FindInput {
+    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn iced_test::core::widget::Operation)) {
+        operate(self);
+    }
+
+    fn focusable(
+        &mut self,
+        id: Option<&iced::widget::Id>,
+        bounds: iced::Rectangle,
+        state: &mut dyn iced_test::core::widget::operation::Focusable,
+    ) {
+        if id == Some(&self.0) {
+            self.1 = Some((bounds, state.is_focused()));
+        }
+    }
+}
+
+/// Finds the focused widget's id.
+struct Focused(Option<String>);
+
+impl iced_test::core::widget::Operation for Focused {
+    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn iced_test::core::widget::Operation)) {
+        operate(self);
+    }
+
+    fn focusable(
+        &mut self,
+        id: Option<&iced::widget::Id>,
+        _bounds: iced::Rectangle,
+        state: &mut dyn iced_test::core::widget::operation::Focusable,
+    ) {
+        if state.is_focused() {
+            self.0 = Some(id.map(|i| format!("{i:?}")).unwrap_or_default());
+        }
+    }
+}
+
+impl Harness {
+    /// Clicks a text input in a persistent window, then types `text` into
+    /// it one key per render, as the real window gets them.
+    fn type_in_window(&mut self, window: &mut Window, id: &str, text: &str) {
+        let (bounds, _) = window.find(&self.app, id).unwrap_or_else(|| panic!("no input {id}"));
+        let at = bounds.center();
+        for m in window.update(&self.app, at, &iced_test::simulator::click().collect::<Vec<_>>()) {
+            self.send(m);
+        }
+        for ch in text.chars() {
+            let events: Vec<_> = iced_test::simulator::typewrite(&ch.to_string()).collect();
+            for m in window.update(&self.app, at, &events) {
+                self.send(m);
+            }
+        }
+    }
+
+    /// Presses a key (with modifiers) in a persistent window, as the real
+    /// app gets it: through the widgets, then the app's key handling, with
+    /// a focus move run on the window's widgets.
+    fn key_in_window(&mut self, window: &mut Window, key: Key, modifiers: Modifiers) {
+        let press = Event::Keyboard(keyboard::Event::KeyPressed {
+            key: key.clone(),
+            modified_key: key.clone(),
+            physical_key: keyboard::key::Physical::Unidentified(keyboard::key::NativeCode::Unidentified),
+            location: keyboard::Location::Standard,
+            modifiers,
+            repeat: false,
+            text: None,
+        });
+        let (messages, statuses) = window.update_with_status(&self.app, iced::Point::ORIGIN, &[press.clone()]);
+        for m in messages {
+            self.send(m);
+        }
+        match key_message(press, statuses[0]) {
+            // The task it returns is a widget operation, which the harness
+            // can't run: run the same operation on the window.
+            Some(Message::FocusMove { back }) => {
+                use iced_test::core::widget::operation::focusable;
+                if back {
+                    window.operate_chained(&self.app, focusable::focus_previous());
+                } else {
+                    window.operate_chained(&self.app, focusable::focus_next());
+                }
+            }
+            Some(m) => self.send(m),
+            None => {}
+        }
+    }
+}
+
+#[test]
+fn typing_a_required_local_name_keeps_the_cursor_where_it_was() {
+    let mut h = Harness::new_with_aboleth();
+    h.click("Add named copy"); // two Aboleths: both need a name
+    let mut window = Window::new();
+    window.update(&h.app, iced::Point::ORIGIN, &[]);
+    h.type_in_window(&mut window, &editor::local_input_id("display", BASE, 0), "Red Fang");
+    assert_eq!(h.doc().encounter.groups[0].base_roster[0].display_name.as_deref(), Some("Red Fang"));
+    h.type_in_window(&mut window, &editor::local_input_id("display", BASE, 1), "Blue Fang");
+    assert_eq!(h.doc().encounter.groups[0].base_roster[1].display_name.as_deref(), Some("Blue Fang"));
+}
+
+/// Finds a scrollable's vertical offset.
+struct ScrollOffset(iced::widget::Id, Option<f32>);
+
+impl iced_test::core::widget::Operation for ScrollOffset {
+    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn iced_test::core::widget::Operation)) {
+        operate(self);
+    }
+
+    fn scrollable(
+        &mut self,
+        id: Option<&iced::widget::Id>,
+        _bounds: iced::Rectangle,
+        _content_bounds: iced::Rectangle,
+        translation: iced::Vector,
+        _state: &mut dyn iced_test::core::widget::operation::Scrollable,
+    ) {
+        if id == Some(&self.0) {
+            self.1 = Some(translation.y);
+        }
+    }
+}
+
+#[test]
+fn dragging_a_monster_keeps_the_editor_scrolled() {
+    let mut h = Harness::new();
+    h.send(Message::Opened(vec![h.res("encounters/bridge.xml")])); // long enough to scroll
+    let mut window = Window::new();
+    let over_editor = iced::Point::new(700.0, 600.0);
+    window.render(&h.app, over_editor, &[]);
+    let wheel = Event::Mouse(mouse::Event::WheelScrolled { delta: mouse::ScrollDelta::Pixels { x: 0.0, y: -400.0 } });
+    let scrolled = window.render(&h.app, over_editor, &[wheel]);
+    assert!(scrolled > 100.0, "the editor didn't scroll ({scrolled})");
+
+    // A drag starts in the browser, and moves far enough to show its ghost...
+    h.send(Message::MonsterPressed(h.res("srd/goblin.xml"), "goblin".into()));
+    h.send(Message::DragMoved(iced::Point::new(100.0, 200.0)));
+    h.send(Message::DragMoved(iced::Point::new(600.0, 500.0)));
+    assert!(h.app.drag.as_ref().unwrap().active);
+    assert_eq!(window.render(&h.app, over_editor, &[]), scrolled, "starting the drag reset the scroll");
+    // ...and is dropped.
+    h.send(Message::DragReleased);
+    assert_eq!(window.render(&h.app, over_editor, &[]), scrolled, "the drop reset the scroll");
+
+    // A modal opening and closing over the page leaves it where it was too.
+    h.send(Message::OpenExport);
+    assert_eq!(window.render(&h.app, over_editor, &[]), scrolled, "opening a modal reset the scroll");
+    h.send(Message::Export(export_modal::Msg::Close));
+    assert_eq!(window.render(&h.app, over_editor, &[]), scrolled, "closing a modal reset the scroll");
+}
+
+#[test]
+fn tab_moves_between_the_local_name_fields() {
+    let mut h = Harness::new_with_aboleth();
+    h.click("Add named copy");
+    let mut window = Window::new();
+    window.update(&h.app, iced::Point::ORIGIN, &[]);
+    let display0 = editor::local_input_id("display", BASE, 0);
+    let short0 = editor::local_input_id("short", BASE, 0);
+    let display1 = editor::local_input_id("display", BASE, 1);
+    let id = |s: &str| format!("{:?}", iced::widget::Id::from(s.to_string()));
+
+    h.type_in_window(&mut window, &display0, "Red");
+    assert_eq!(window.focused(&h.app), Some(id(&display0)));
+    h.key_in_window(&mut window, Key::Named(Named::Tab), Modifiers::empty());
+    assert_eq!(window.focused(&h.app), Some(id(&short0)), "Tab goes to the short name");
+    let events: Vec<_> = iced_test::simulator::typewrite("Fang").collect();
+    for m in window.update(&h.app, iced::Point::ORIGIN, &events) {
+        h.send(m);
+    }
+    assert_eq!(h.doc().encounter.groups[0].base_roster[0].short_name.as_deref(), Some("Fang"));
+    h.key_in_window(&mut window, Key::Named(Named::Tab), Modifiers::empty());
+    assert_eq!(window.focused(&h.app), Some(id(&display1)), "then to the next row's name");
+    h.key_in_window(&mut window, Key::Named(Named::Tab), Modifiers::SHIFT);
+    assert_eq!(window.focused(&h.app), Some(id(&short0)), "Shift+Tab goes back");
+}
+
+#[test]
+fn tab_is_left_to_the_widgets_that_use_it() {
+    let tab = |status| {
+        key_message(
+            Event::Keyboard(keyboard::Event::KeyPressed {
+                key: Key::Named(Named::Tab),
+                modified_key: Key::Named(Named::Tab),
+                physical_key: keyboard::key::Physical::Unidentified(keyboard::key::NativeCode::Unidentified),
+                location: keyboard::Location::Standard,
+                modifiers: Modifiers::empty(),
+                repeat: false,
+                text: None,
+            }),
+            status,
+        )
+    };
+    assert!(matches!(tab(event::Status::Ignored), Some(Message::FocusMove { back: false })));
+    assert!(tab(event::Status::Captured).is_none());
 }

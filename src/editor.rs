@@ -32,6 +32,15 @@ pub enum Edit {
     Target(RosterRef),
     Count(RosterRef, usize, u32),
     RemoveRow(RosterRef, usize),
+    /// Shows or hides a roster row's local name fields.
+    ToggleLocalNames(RosterRef, usize),
+    /// Adds another entry for a row's stat block below it, for another
+    /// named monster of the same kind.
+    AddNamedCopy(RosterRef, usize),
+    /// A roster row's own display name (blank: its reference's).
+    LocalDisplayName(RosterRef, usize, String),
+    /// A roster row's own short name (blank: its reference's).
+    LocalShortName(RosterRef, usize, String),
     DisplayName(usize, String),
     ShortName(usize, String),
     RemoveReference(usize),
@@ -46,6 +55,11 @@ pub struct Row<'a> {
     /// XP for all of them; None when the monster or its CR isn't known.
     pub xp: Option<u32>,
     pub found: bool,
+    /// The name it has without the row's own: the reference's or the stat block's.
+    pub base_name: String,
+    /// The row's own names, if it has any.
+    pub local_display: Option<&'a str>,
+    pub local_short: Option<&'a str>,
 }
 
 impl Document {
@@ -53,7 +67,12 @@ impl Document {
     pub fn apply(&mut self, edit: Edit) {
         // Working in a roster picks it for "Add to roster".
         let touched = match &edit {
-            Edit::Count(at, ..) | Edit::RemoveRow(at, _) => Some(*at),
+            Edit::Count(at, ..)
+            | Edit::RemoveRow(at, _)
+            | Edit::ToggleLocalNames(at, _)
+            | Edit::AddNamedCopy(at, _)
+            | Edit::LocalDisplayName(at, ..)
+            | Edit::LocalShortName(at, ..) => Some(*at),
             Edit::AltLevel(g, a, _) | Edit::AltPcs(g, a, _) => Some(RosterRef { group: *g, roster: RosterSel::Alt(*a) }),
             _ => None,
         };
@@ -85,6 +104,7 @@ impl Document {
             Edit::RemoveGroup(g) => {
                 if g < e.groups.len() && e.groups.len() > 1 {
                     e.groups.remove(g);
+                    self.local_names_open.clear(); // rows have moved
                     self.target = match self.target {
                         t if t.group == g => RosterRef::FIRST,
                         t if t.group > g => RosterRef { group: t.group - 1, ..t },
@@ -105,6 +125,7 @@ impl Document {
             Edit::RemoveAlt(g, a) => match e.groups.get_mut(g) {
                 Some(group) if a < group.alt_rosters.len() => {
                     group.alt_rosters.remove(a);
+                    self.local_names_open.clear(); // rows have moved
                     if self.target.group == g {
                         self.target.roster = match self.target.roster {
                             RosterSel::Alt(i) if i == a => RosterSel::Base,
@@ -131,10 +152,40 @@ impl Document {
             Edit::RemoveRow(at, row) => match e.roster_mut(at) {
                 Some(r) if row < r.len() => {
                     r.remove(row);
+                    self.local_names_open.remove(&(at, row));
+                    shift_open_rows(&mut self.local_names_open, at, row + 1, -1);
                     true
                 }
                 _ => false,
             },
+            Edit::ToggleLocalNames(at, row) => {
+                let key = (at, row);
+                if !self.local_names_open.remove(&key) {
+                    self.local_names_open.insert(key);
+                }
+                false // showing fields isn't an edit of the file
+            }
+            Edit::AddNamedCopy(at, row) => match e.add_named_copy(at, row) {
+                Some(new) => {
+                    shift_open_rows(&mut self.local_names_open, at, new, 1);
+                    self.local_names_open.insert((at, new));
+                    true
+                }
+                None => false,
+            },
+            Edit::LocalDisplayName(at, row, v) => {
+                // Stay open while typing, even once a required name is given.
+                self.local_names_open.insert((at, row));
+                e.roster_mut(at)
+                    .and_then(|r| r.get_mut(row))
+                    .is_some_and(|m| set(&mut m.display_name, non_empty(v)))
+            }
+            Edit::LocalShortName(at, row, v) => {
+                self.local_names_open.insert((at, row));
+                e.roster_mut(at)
+                    .and_then(|r| r.get_mut(row))
+                    .is_some_and(|m| set(&mut m.short_name, non_empty(v)))
+            }
             Edit::DisplayName(i, v) => e.references.get_mut(i).is_some_and(|r| set(&mut r.display_name, non_empty(v))),
             Edit::ShortName(i, v) => e.references.get_mut(i).is_some_and(|r| set(&mut r.short_name, non_empty(v))),
             Edit::RemoveReference(i) => {
@@ -148,6 +199,18 @@ impl Document {
         if changed {
             self.dirty = true;
         }
+    }
+}
+
+/// Moves open local-name rows of a roster, from `from` on, by `by` rows
+/// (after a row is inserted or removed above them).
+fn shift_open_rows(open: &mut HashSet<(RosterRef, usize)>, at: RosterRef, from: usize, by: isize) {
+    let moved: Vec<_> = open.iter().filter(|(r, row)| *r == at && *row >= from).copied().collect();
+    for key in &moved {
+        open.remove(key);
+    }
+    for (r, row) in moved {
+        open.insert((r, row.saturating_add_signed(by)));
     }
 }
 
@@ -193,10 +256,12 @@ impl App {
             .map(|entry| {
                 let reference = e.references.iter().find(|r| r.id == entry.id);
                 let monster = reference.and_then(|r| self.referenced_monster(r)).map(|(_, m)| m);
-                let name = reference
+                // This roster's name for it, else the reference's, else the stat block's.
+                let base_name = reference
                     .and_then(|r| r.display_name.clone())
                     .or_else(|| monster.map(|m| m.name.clone()))
                     .unwrap_or_else(|| entry.id.clone());
+                let name = entry.display_name.clone().unwrap_or_else(|| base_name.clone());
                 let cr = monster.and_then(|m| m.cr.as_deref());
                 Row {
                     id: &entry.id,
@@ -205,6 +270,9 @@ impl App {
                     count: entry.count,
                     xp: cr.and_then(xp::for_cr).map(|x| x * entry.count),
                     found: monster.is_some(),
+                    base_name,
+                    local_display: entry.display_name.as_deref(),
+                    local_short: entry.short_name.as_deref(),
                 }
             })
             .collect()
@@ -248,7 +316,10 @@ impl App {
                     .spacing(2),
             );
         }
-        scrollable(body.padding(iced::Padding::ZERO.right(12))).height(Length::Fill).into()
+        scrollable(body.padding(iced::Padding::ZERO.right(12)))
+            .id(EDITOR_SCROLL)
+            .height(Length::Fill)
+            .into()
     }
 
     fn group_card<'a>(&'a self, doc: &'a Document, g: usize, group: &'a encounter::Group) -> Element<'a, Message> {
@@ -323,12 +394,56 @@ impl App {
             );
         }
         for (i, r) in rows.iter().enumerate() {
-            let mut name = column![
-                button(text(r.name.clone()).size(14))
-                    .padding([2, 0])
-                    .style(button::text)
-                    .on_press(Message::RosterMonster(id, at, r.id.to_string()))
-            ];
+            // A stat block listed more than once needs a name on each entry:
+            // its fields stay open until it has one.
+            let required = e.needs_local_name(at, i);
+            let open = required || doc.local_names_open.contains(&(at, i));
+            let has_local = r.local_display.is_some() || r.local_short.is_some();
+            // Small and unpadded, so they don't make the row taller.
+            let local_label = if required {
+                text("Local name needed").size(11).style(text::danger)
+            } else {
+                text(if has_local { "Local names •" } else { "Local names" }).size(11)
+            };
+            let local_toggle = button(local_label)
+                .padding(0)
+                .style(if open && !required { button::primary } else { button::text })
+                .on_press_maybe((!required).then(|| edit(Edit::ToggleLocalNames(at, i))));
+            let copy = button(text("Add named copy").size(11))
+                .padding(0)
+                .style(button::text)
+                .on_press(edit(Edit::AddNamedCopy(at, i)));
+            // Open, the fields take over the line (the name is in the display
+            // field, or its placeholder); closed, the name and the buttons.
+            let name_line = if open {
+                row![
+                    local_toggle,
+                    text_input(&format!("Name in this roster ({})", r.base_name), r.local_display.unwrap_or_default())
+                        .id(local_input_id("display", at, i))
+                        .size(12)
+                        .padding([2, 4])
+                        .on_input(move |v| edit(Edit::LocalDisplayName(at, i, v)))
+                        .width(Length::FillPortion(3)),
+                    text_input("Short name", r.local_short.unwrap_or_default())
+                        .id(local_input_id("short", at, i))
+                        .size(12)
+                        .padding([2, 4])
+                        .on_input(move |v| edit(Edit::LocalShortName(at, i, v)))
+                        .width(Length::FillPortion(2)),
+                ]
+            } else {
+                row![
+                    button(text(r.name.clone()).size(14))
+                        .padding([2, 0])
+                        .style(button::text)
+                        .on_press(Message::RosterMonster(id, at, r.id.to_string())),
+                    local_toggle,
+                    copy,
+                ]
+            }
+            .spacing(8)
+            .align_y(Alignment::Center);
+            let mut name = column![name_line];
             if !r.found {
                 name = name.push(text(format!("{} isn't in the monster folders", r.id)).size(11).style(text::danger));
             }
@@ -469,6 +584,18 @@ impl App {
         }
         container(col).padding(12).width(Length::Fill).style(container::bordered_box).into()
     }
+}
+
+/// The encounter editor's scrollable.
+pub const EDITOR_SCROLL: &str = "editor-scroll";
+
+/// The id of a roster row's local name field ("display" or "short").
+pub fn local_input_id(kind: &str, at: RosterRef, row: usize) -> String {
+    let roster = match at.roster {
+        RosterSel::Base => "base".to_string(),
+        RosterSel::Alt(a) => format!("alt{a}"),
+    };
+    format!("local-{kind}-{}-{roster}-{row}", at.group)
 }
 
 // Roster table column widths; the monster name takes the rest.

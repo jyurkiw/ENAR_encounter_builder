@@ -126,52 +126,69 @@ pub async fn render(renderer: Renderer, request: Request) -> Result<Vec<Vec<u8>>
 }
 
 async fn run_compiler(request: &Request, out: &Path) -> Result<(), String> {
-    if !request.compiler_dir.join("encompile").is_dir() {
-        return Err(format!(
-            "No encompile compiler in {}. Set its folder in Configuration.",
-            request.compiler_dir.display()
-        ));
-    }
     let script = request.cache_root.join("statblock.py");
     if std::fs::read_to_string(&script).ok().as_deref() != Some(SCRIPT) {
         std::fs::write(&script, SCRIPT).map_err(|e| format!("Couldn't write {}: {e}", script.display()))?;
     }
 
-    let mut cmd = tokio::process::Command::new(&request.uv_command);
-    cmd.arg("run")
-        .arg("--project")
-        .arg(&request.compiler_dir)
-        .arg("python")
+    let output = compiler_command(&request.compiler_dir, &request.uv_command, &request.cache_root)?
         .arg(&script)
         .arg(&request.compiler_dir)
         .arg(&request.key.file)
         .arg(&request.key.monster)
         .arg(out)
         .arg(DPI)
-        .env("UV_PROJECT_ENVIRONMENT", request.cache_root.join("python-env"))
-        .env("PYTHONIOENCODING", "utf-8")
-        .current_dir(&request.compiler_dir);
-    #[cfg(windows)]
-    cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW: no console flashing up
-
-    let output = cmd.output().await.map_err(|e| {
-        format!(
-            "Couldn't run uv ({}): {e}. Install uv, or set uv_command in the config file.",
-            request.uv_command
-        )
-    })?;
+        .output()
+        .await
+        .map_err(|e| uv_missing(&request.uv_command, e))?;
     if output.status.success() {
         return Ok(());
     }
+    Err(failure(&output.stderr))
+}
+
+/// `uv run --project <compiler> python`, in the compiler's folder, with its
+/// Python environment in our cache folder; add the script and its arguments.
+pub fn compiler_command(
+    compiler_dir: &Path,
+    uv_command: &str,
+    cache_root: &Path,
+) -> Result<tokio::process::Command, String> {
+    if !compiler_dir.join("encompile").is_dir() {
+        return Err(format!(
+            "No encompile compiler in {}. Set its folder in Configuration.",
+            compiler_dir.display()
+        ));
+    }
+    let mut cmd = tokio::process::Command::new(uv_command);
+    cmd.arg("run")
+        .arg("--project")
+        .arg(compiler_dir)
+        .arg("python")
+        .env("UV_PROJECT_ENVIRONMENT", cache_root.join("python-env"))
+        .env("PYTHONIOENCODING", "utf-8")
+        .current_dir(compiler_dir);
+    #[cfg(windows)]
+    cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW: no console flashing up
+    Ok(cmd)
+}
+
+/// The message for uv not starting.
+pub fn uv_missing(uv_command: &str, e: std::io::Error) -> String {
+    format!("Couldn't run uv ({uv_command}): {e}. Install uv, or set uv_command in the config file.")
+}
+
+/// The message for a failed compiler run, from its stderr.
+pub fn failure(stderr: &[u8]) -> String {
     // The compiler's own errors start with "error:"; show those, or the tail.
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = String::from_utf8_lossy(stderr);
     let errors: Vec<&str> = stderr.lines().filter(|l| l.trim_start().starts_with("error:")).collect();
     let detail = if errors.is_empty() {
         stderr.lines().rev().take(6).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n")
     } else {
         errors.join("\n")
     };
-    Err(format!("The compiler failed:\n{}", detail.trim()))
+    format!("The compiler failed:\n{}", detail.trim())
 }
 
 #[cfg(test)]

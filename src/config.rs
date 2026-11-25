@@ -24,6 +24,8 @@ pub struct Config {
     pub compiler_dir: String,
     /// How to run uv (a name on PATH or a full path).
     pub uv_command: String,
+    /// The folder the last Foundry export went to.
+    pub foundry_export_dir: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -46,6 +48,7 @@ impl Default for Config {
             }],
             compiler_dir: format!("{RES_PREFIX}compiler"),
             uv_command: "uv".to_string(),
+            foundry_export_dir: String::new(),
         }
     }
 }

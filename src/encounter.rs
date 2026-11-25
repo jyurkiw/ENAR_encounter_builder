@@ -47,6 +47,16 @@ pub struct AltRoster {
 pub struct RosterEntry {
     pub id: String,
     pub count: u32,
+    /// Names for the monster in this roster only, in place of its
+    /// reference's (and its stat block's).
+    pub display_name: Option<String>,
+    pub short_name: Option<String>,
+}
+
+impl RosterEntry {
+    pub fn new(id: impl Into<String>, count: u32) -> RosterEntry {
+        RosterEntry { id: id.into(), count, display_name: None, short_name: None }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -174,14 +184,14 @@ impl Encounter {
 // ----- editing -----------------------------------------------------------------
 
 /// Which roster of a group.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RosterSel {
     Base,
     Alt(usize),
 }
 
 /// A roster in the encounter: its group and which of the group's rosters.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RosterRef {
     pub group: usize,
     pub roster: RosterSel,
@@ -238,12 +248,34 @@ impl Encounter {
                 id
             }
         };
+        // One more of the plain (unnamed) entry for it; named copies are
+        // individuals, so with only those, a new entry.
         let roster = self.roster_mut(at)?;
-        match roster.iter_mut().find(|e| e.id == id) {
+        match roster.iter_mut().find(|e| e.id == id && e.display_name.is_none()) {
             Some(e) => e.count += 1,
-            None => roster.push(RosterEntry { id: id.clone(), count: 1 }),
+            None => roster.push(RosterEntry::new(id.clone(), 1)),
         }
         Some(id)
+    }
+
+    /// Adds another entry for the same stat block as a roster's row, just
+    /// below it, for a second named monster. Returns its row.
+    pub fn add_named_copy(&mut self, at: RosterRef, row: usize) -> Option<usize> {
+        let roster = self.roster_mut(at)?;
+        let id = roster.get(row)?.id.clone();
+        roster.insert(row + 1, RosterEntry::new(id, 1));
+        Some(row + 1)
+    }
+
+    /// Whether a roster row must have a local display name: its stat block
+    /// is listed more than once in the roster, and it has none.
+    pub fn needs_local_name(&self, at: RosterRef, row: usize) -> bool {
+        let Some(roster) = self.roster(at) else {
+            return false;
+        };
+        roster.get(row).is_some_and(|entry| {
+            entry.display_name.is_none() && roster.iter().filter(|e| e.id == entry.id).count() > 1
+        })
     }
 
     /// `base`, or `base-2`, `base-3`, ... if it's taken.
@@ -300,9 +332,34 @@ impl Encounter {
         if self.groups.is_empty() {
             out.push("The encounter needs at least one group.".into());
         }
-        for g in &self.groups {
+        for (gi, g) in self.groups.iter().enumerate() {
             if g.base_roster.is_empty() {
                 out.push(format!("{}: the base roster has no monsters.", g.name));
+            }
+            let rosters = std::iter::once((RosterSel::Base, "the base roster".to_string())).chain(
+                g.alt_rosters
+                    .iter()
+                    .enumerate()
+                    .map(|(i, a)| (RosterSel::Alt(i), format!("the level {} roster for {} PCs", a.level, a.num_pcs))),
+            );
+            for (sel, label) in rosters {
+                let at = RosterRef { group: gi, roster: sel };
+                let roster = self.roster(at).map(Vec::as_slice).unwrap_or_default();
+                let mut reported = Vec::new();
+                for (row, entry) in roster.iter().enumerate() {
+                    if self.needs_local_name(at, row) && !reported.contains(&&entry.id) {
+                        reported.push(&entry.id);
+                        out.push(format!(
+                            "{}: {label} lists {} more than once; each needs its own local display name.",
+                            g.name, entry.id
+                        ));
+                    }
+                    if let Some(name) = &entry.display_name
+                        && roster[..row].iter().any(|e| e.id == entry.id && e.display_name.as_ref() == Some(name))
+                    {
+                        out.push(format!("{}: {label} has two {} named \"{name}\".", g.name, entry.id));
+                    }
+                }
             }
             for (i, a) in g.alt_rosters.iter().enumerate() {
                 if a.monsters.is_empty() {
@@ -360,6 +417,8 @@ fn roster(node: roxmltree::Node) -> Result<Vec<RosterEntry>, String> {
             Ok(RosterEntry {
                 id: m.attribute("id").unwrap_or_default().to_string(),
                 count: number(m, "count", Some(1))?,
+                display_name: m.attribute("displayName").map(str::to_string),
+                short_name: m.attribute("shortName").map(str::to_string),
             })
         })
         .collect()
@@ -368,11 +427,17 @@ fn roster(node: roxmltree::Node) -> Result<Vec<RosterEntry>, String> {
 fn write_roster(s: &mut String, tag: &str, attrs: &str, monsters: &[RosterEntry]) {
     let _ = writeln!(s, "        <{tag}{attrs}>");
     for m in monsters {
-        if m.count == 1 {
-            let _ = writeln!(s, r#"            <monster id="{}"/>"#, esc(&m.id));
-        } else {
-            let _ = writeln!(s, r#"            <monster id="{}" count="{}"/>"#, esc(&m.id), m.count);
+        let mut line = format!(r#"            <monster id="{}""#, esc(&m.id));
+        if m.count != 1 {
+            let _ = write!(line, r#" count="{}""#, m.count);
         }
+        if let Some(v) = &m.display_name {
+            let _ = write!(line, r#" displayName="{}""#, esc(v));
+        }
+        if let Some(v) = &m.short_name {
+            let _ = write!(line, r#" shortName="{}""#, esc(v));
+        }
+        let _ = writeln!(s, "{line}/>");
     }
     let _ = writeln!(s, "        </{tag}>");
 }
@@ -395,6 +460,56 @@ mod tests {
         assert_eq!(encounter.groups[0].alt_rosters.len(), 2);
         assert_eq!(encounter.groups[0].base_roster[4].count, 1);
         assert_eq!(Encounter::parse(&encounter.to_xml()).unwrap(), encounter);
+    }
+
+    #[test]
+    fn roster_monsters_keep_local_names() {
+        let mut e = Encounter::default();
+        e.add_monster(RosterRef::FIRST, "res://srd/goblin.xml", "goblin");
+        e.add_monster(RosterRef::FIRST, "res://srd/goblin.xml", "goblin");
+        let entry = &mut e.groups[0].base_roster[0];
+        entry.display_name = Some("Gate Guard".into());
+        entry.short_name = Some("Guard".into());
+        let xml = e.to_xml();
+        assert!(
+            xml.contains(r#"<monster id="goblin" count="2" displayName="Gate Guard" shortName="Guard"/>"#),
+            "{xml}"
+        );
+        assert_eq!(Encounter::parse(&xml).unwrap(), e);
+        // Adding another keeps them.
+        e.add_monster(RosterRef::FIRST, "res://srd/goblin.xml", "goblin");
+        assert_eq!(e.groups[0].base_roster[0].display_name.as_deref(), Some("Gate Guard"));
+    }
+
+    #[test]
+    fn a_roster_can_list_a_stat_block_more_than_once_with_names() {
+        let mut e = Encounter::default();
+        let at = RosterRef::FIRST;
+        e.add_monster(at, "res://srd/bandit.xml", "bandit");
+        assert_eq!(e.add_named_copy(at, 0), Some(1));
+        assert_eq!(e.groups[0].base_roster.len(), 2);
+        // Both unnamed: both need names, reported once.
+        assert!(e.needs_local_name(at, 0) && e.needs_local_name(at, 1));
+        let problems = e.problems();
+        assert_eq!(problems.iter().filter(|p| p.contains("lists bandit more than once")).count(), 1, "{problems:?}");
+
+        e.groups[0].base_roster[0].display_name = Some("Red".into());
+        e.groups[0].base_roster[1].display_name = Some("Red".into());
+        assert!(!e.needs_local_name(at, 0));
+        assert!(e.problems().iter().any(|p| p.contains(r#"two bandit named "Red""#)));
+        e.groups[0].base_roster[1].display_name = Some("Blue".into());
+        assert!(!e.problems().iter().any(|p| p.contains("bandit")));
+
+        // Saved and read back as two entries.
+        assert_eq!(Encounter::parse(&e.to_xml()).unwrap(), e);
+
+        // A plain add with only named entries makes a new, unnamed one...
+        e.add_monster(at, "res://srd/bandit.xml", "bandit");
+        assert_eq!(e.groups[0].base_roster.len(), 3);
+        assert!(e.needs_local_name(at, 2));
+        // ...and another plain add counts that one up.
+        e.add_monster(at, "res://srd/bandit.xml", "bandit");
+        assert_eq!(e.groups[0].base_roster[2].count, 2);
     }
 
     #[test]
@@ -434,7 +549,7 @@ mod tests {
         let at = RosterRef::FIRST;
         assert_eq!(e.add_monster(at, "res://srd/goblin.xml", "goblin").as_deref(), Some("goblin"));
         e.add_monster(at, "res://srd/goblin.xml", "goblin");
-        assert_eq!(e.groups[0].base_roster, vec![RosterEntry { id: "goblin".into(), count: 2 }]);
+        assert_eq!(e.groups[0].base_roster, vec![RosterEntry::new("goblin", 2)]);
         assert_eq!(e.references.len(), 1);
         // Same monster id from another file: its own reference, renamed.
         assert_eq!(e.add_monster(at, "res://mine/goblin.xml", "goblin").as_deref(), Some("goblin-2"));
