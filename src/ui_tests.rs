@@ -1959,3 +1959,240 @@ fn tab_is_left_to_the_widgets_that_use_it() {
     assert!(matches!(tab(event::Status::Ignored), Some(Message::FocusMove { back: false })));
     assert!(tab(event::Status::Captured).is_none());
 }
+
+// ----- encounter description -------------------------------------------------------
+
+/// A fake description compiler: writes a PDF and one page into the job's
+/// folder and warns once, or fails with `fail`. Returns where it records the
+/// last job.
+fn fake_describer(h: &mut Harness, fail: Option<&str>) -> Arc<Mutex<Option<description::Job>>> {
+    let last = Arc::new(Mutex::new(None::<description::Job>));
+    let fail = fail.map(str::to_string);
+    h.app.describer = description::Compiler::Fake({
+        let last = last.clone();
+        Arc::new(move |job: &description::Job| {
+            *last.lock().unwrap() = Some(job.clone());
+            if let Some(e) = &fail {
+                return Err(e.clone());
+            }
+            fs::write(job.out.join("description.pdf"), b"%PDF-1.7 fake").map_err(|e| e.to_string())?;
+            fs::write(job.out.join("page0.png"), statblock::tests::TINY_PNG).map_err(|e| e.to_string())?;
+            Ok(vec!["Aboleth: a warning from the compiler".into()])
+        })
+    });
+    last
+}
+
+impl Harness {
+    fn description_window(&self) -> &description_window::DescriptionWindow {
+        self.app.description_window.as_ref().expect("the description window is open")
+    }
+
+    /// Simulates on a fresh render of the description window, as `view_window` draws it.
+    fn interact_description(&mut self, f: impl FnOnce(&mut iced_test::Simulator<'_, Message>)) {
+        let id = self.description_window().id;
+        let messages: Vec<Message> = {
+            let mut ui = iced_test::Simulator::with_size(
+                iced::Settings::default(),
+                description_window_settings().size,
+                self.app.view_window(id),
+            );
+            f(&mut ui);
+            ui.into_messages().collect()
+        };
+        for m in messages {
+            self.send(m);
+        }
+    }
+
+    fn description_shows(&mut self, text: &str) -> bool {
+        let id = self.description_window().id;
+        iced_test::Simulator::with_size(iced::Settings::default(), description_window_settings().size, self.app.view_window(id))
+            .find(text)
+            .is_ok()
+    }
+
+    fn block_labels(&self) -> Vec<(String, bool)> {
+        self.app.description.as_ref().unwrap().blocks.iter().map(|(b, on)| (b.label(), *on)).collect()
+    }
+}
+
+const ALT: encounter::RosterRef = encounter::RosterRef { group: 0, roster: encounter::RosterSel::Alt(0) };
+
+#[test]
+fn description_needs_an_open_encounter() {
+    let mut h = Harness::new();
+    h.click("Encounter Description"); // disabled: nothing happens
+    assert!(h.app.description.is_none());
+    h.click("New");
+    h.click("Encounter Description");
+    assert!(h.app.description.is_some());
+}
+
+#[test]
+fn description_lists_every_roster_and_a_stat_block_per_name() {
+    let mut h = Harness::new_with_named_aboleths();
+    h.edit(editor::Edit::AddAlt(0));
+    h.click("Encounter Description");
+    h.assert_shows("Group 1 · base roster · level 1, 4 PCs");
+    h.assert_shows("Group 1 · alternate roster · level 2, 4 PCs");
+    // The short name tops the block, else the display name; a plain monster has none.
+    h.assert_shows("Elder (Aboleth)");
+    h.assert_shows("Pup (Aboleth)");
+    h.assert_shows("Goblin");
+    let labels = h.block_labels();
+    assert_eq!(labels, [("Elder (Aboleth)".into(), true), ("Pup (Aboleth)".into(), true), ("Goblin".into(), true)]);
+}
+
+#[test]
+fn unticking_a_roster_drops_the_stat_blocks_only_it_uses() {
+    let mut h = Harness::new_with_aboleth();
+    h.edit(editor::Edit::AddAlt(0)); // a copy of the base, and now the target roster
+    h.click("Goblin (CR 1/4)");
+    h.click("Add to roster");
+    assert_eq!(h.doc().target, ALT);
+    h.click("Encounter Description");
+    assert_eq!(h.block_labels(), [("Aboleth".into(), true), ("Goblin".into(), true)]);
+
+    h.click("Group 1 · alternate roster · level 2, 4 PCs");
+    assert_eq!(h.block_labels(), [("Aboleth".into(), true)]);
+
+    // Unticking every roster leaves nothing to describe.
+    h.click("Group 1 · base roster · level 1, 4 PCs");
+    h.assert_shows("No stat blocks: choose a roster with monsters.");
+    h.click("Okay");
+    assert!(h.app.description.is_some(), "Okay is disabled with no roster");
+}
+
+#[test]
+fn a_stat_block_keeps_its_tick_when_the_rosters_change() {
+    let mut h = Harness::new_with_aboleth();
+    h.edit(editor::Edit::AddAlt(0));
+    h.click("Goblin (CR 1/4)");
+    h.click("Add to roster");
+    h.click("Encounter Description");
+    h.click("Aboleth");
+    assert_eq!(h.block_labels(), [("Aboleth".into(), false), ("Goblin".into(), true)]);
+    h.click("Group 1 · alternate roster · level 2, 4 PCs");
+    h.click("Group 1 · alternate roster · level 2, 4 PCs");
+    // The Aboleth stays unticked; the Goblin, back again, starts ticked.
+    assert_eq!(h.block_labels(), [("Aboleth".into(), false), ("Goblin".into(), true)]);
+    h.click("All");
+    assert_eq!(h.block_labels(), [("Aboleth".into(), true), ("Goblin".into(), true)]);
+    h.click("None");
+    assert_eq!(h.block_labels(), [("Aboleth".into(), false), ("Goblin".into(), false)]);
+}
+
+#[test]
+fn okay_compiles_the_chosen_rosters_and_stat_blocks_in_the_description_window() {
+    let mut h = Harness::new_with_named_aboleths();
+    let last = fake_describer(&mut h, None);
+    h.click("Encounter Description");
+    h.click("Goblin"); // not in the bestiary
+    h.click("Okay");
+
+    assert!(h.app.description.is_none(), "the modal closes");
+    let job = last.lock().unwrap().clone().expect("a description was compiled");
+    assert_eq!(job.title, "New Encounter");
+    assert_eq!(job.out, description::out_dir(&h.app.cache_root, "new-encounter"));
+    assert_eq!(job.parties.len(), 1);
+    assert_eq!(job.parties[0].title, "Level 1, 4 PCs");
+    let rows: Vec<_> =
+        job.parties[0].rosters[0].rows.iter().map(|r| (r.name.as_str(), r.count, r.cr.as_deref())).collect();
+    assert_eq!(rows, [("Elder", 1, Some("10")), ("Younger", 1, Some("10")), ("Goblin", 1, Some("1/4"))]);
+    let headings: Vec<_> = job.bestiary.iter().map(|b| b.heading.as_deref()).collect();
+    assert_eq!(headings, [Some("Elder"), Some("Pup")]);
+    assert_eq!(job.monsters[0].file, h.res("srd/aboleth.xml"));
+
+    assert!(matches!(&h.description_window().state, description_window::State::Ready { pages, .. } if pages.len() == 1));
+    assert_eq!(h.app.window_title(h.description_window().id), "New Encounter — Encounter Description");
+    assert!(h.description_shows("New Encounter"));
+    assert!(h.description_shows("⚠ Aboleth: a warning from the compiler"));
+    // The main window is still the main window.
+    h.assert_shows("Encounter Description");
+}
+
+#[test]
+fn save_pdf_copies_the_compiled_pdf() {
+    let mut h = Harness::new_with_named_aboleths();
+    let _ = fake_describer(&mut h, None);
+    h.click("Encounter Description");
+    h.click("Okay");
+
+    let to = h.root.path().join("Bridge write-up"); // no extension: .pdf is added
+    h.dialogs.answer(vec![to.clone()]);
+    h.interact_description(|ui| click_topmost(ui, "Save PDF…"));
+    let saved = to.with_extension("pdf");
+    assert_eq!(fs::read(&saved).unwrap(), b"%PDF-1.7 fake");
+    assert!(h.description_shows(&format!("Saved {}", saved.display())));
+
+    // A cancelled dialog writes nothing.
+    h.dialogs.answer(vec![]);
+    h.interact_description(|ui| click_topmost(ui, "Save PDF…"));
+    assert!(matches!(&h.description_window().saved, Some(Ok(p)) if *p == saved));
+}
+
+#[test]
+fn a_failed_description_says_why() {
+    let mut h = Harness::new_with_named_aboleths();
+    let _ = fake_describer(&mut h, Some("pdflatex not found"));
+    h.click("Encounter Description");
+    h.click("Okay");
+    assert!(h.description_shows("The description couldn't be compiled"));
+    assert!(h.description_shows("pdflatex not found"));
+    // Nothing to save.
+    h.interact_description(|ui| click_topmost(ui, "Save PDF…"));
+    assert!(h.description_window().saved.is_none());
+}
+
+#[test]
+fn a_new_description_reuses_the_open_window() {
+    let mut h = Harness::new_with_named_aboleths();
+    let last = fake_describer(&mut h, None);
+    h.click("Encounter Description");
+    h.click("Okay");
+    let first = h.description_window().id;
+    h.click("Encounter Description");
+    h.click("Elder (Aboleth)");
+    h.click("Okay");
+    assert_eq!(h.description_window().id, first);
+    assert_eq!(last.lock().unwrap().as_ref().unwrap().bestiary.len(), 2);
+}
+
+#[test]
+fn shortcuts_wait_while_the_description_modal_is_open() {
+    let mut h = Harness::new();
+    h.click("New");
+    h.click("Encounter Description");
+    h.send(Message::Shortcut(Shortcut::New));
+    assert_eq!(h.app.docs.len(), 1);
+    h.click("Cancel");
+    assert!(h.app.description.is_none());
+    h.send(Message::Shortcut(Shortcut::New));
+    assert_eq!(h.app.docs.len(), 2);
+}
+
+#[test]
+fn the_description_window_leaves_the_main_window_alone() {
+    let mut h = Harness::new_with_named_aboleths();
+    let _ = fake_describer(&mut h, None);
+    let main = window::Id::unique();
+    h.app.main_window = Some(main);
+    h.click("Encounter Description");
+    h.click("Okay");
+    let other = h.description_window().id;
+
+    // Its resizes and shortcuts are not the main window's.
+    let width = h.app.window_width;
+    h.send(Message::InWindow(other, Box::new(Message::WindowResized(Size::new(500.0, 500.0)))));
+    h.send(Message::InWindow(other, Box::new(Message::Shortcut(Shortcut::New))));
+    assert_eq!(h.app.window_width, width);
+    assert_eq!(h.app.docs.len(), 1);
+    h.send(Message::InWindow(main, Box::new(Message::WindowResized(Size::new(1200.0, 800.0)))));
+    assert_eq!(h.app.window_width, 1200.0);
+
+    // Closing it forgets it; the main window carries on.
+    h.send(Message::WindowClosed(other));
+    assert!(h.app.description_window.is_none());
+    assert_eq!(h.app.docs.len(), 1);
+}

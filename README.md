@@ -39,7 +39,7 @@ Without them everything else works; the viewer shows why it couldn't draw a stat
 
 ## Using it
 
-The window has a ribbon along the top (New, Open, Save, Save All, Export to Foundry, Configuration), the monster browser on the left, the open encounters in the middle, and the monster viewer on the right.
+The window has a ribbon along the top (New, Open, Save, Save All, Encounter Description, Export to Foundry, Configuration), the monster browser on the left, the open encounters in the middle, and the monster viewer on the right.
 
 **Monster browser.** Lists the monsters in the SRD folder and your monster folders as `Name (CR X)`. Folder headings and files holding several monsters are collapsible headings; the filter box searches names and ids. A monster's file is shown only when another file has a monster of the same name. Click a monster to see its stat block; drag it onto a roster to add it.
 
@@ -56,6 +56,8 @@ The window has a ribbon along the top (New, Open, Save, Save All, Export to Foun
 - Problems the schema would reject (an empty roster, two alternate rosters for the same party) are listed at the bottom.
 
 Shortcuts: Ctrl+N, Ctrl+O, Ctrl+S, Ctrl+Shift+S (Save All). Tab and Shift+Tab move between text fields (from a local name to its short name, then on to the next row).
+
+**Encounter Description.** A book-style write-up of the active encounter, compiled by encompile like the stat blocks (so it needs uv and LaTeX too). A modal asks what goes in: tick the rosters (every group's base and alternate rosters, all ticked to start), then the bestiary's stat blocks, which follow the rosters you tick. A stat block is listed once per name it's used under, so the Triton Ambusher used as both Dohovos and Remors prints twice, each under its short name (else its display name); a name that's the stat block's own prints no heading. Okay compiles it into its own window: a section per party (level and number of PCs, so every group's roster for level 5 with 5 PCs is together), and in it each group's table (Name, Number, CR, AC, HP, XP, with AC and HP read from the stat blocks) with the group's intended difficulty and the roster's total XP and difficulty; then the Bestiary. A stat block can carry on into the next column but never onto the next page: one that would starts a new page instead (a stat block longer than a page gets a warning). **Save PDF…** saves a copy of the PDF. A new description replaces what the window shows; closing the main window closes it too.
 
 **Export to Foundry.** Writes the active encounter's monsters as Foundry VTT actor files (dnd5e), using the compiler's `encompile.foundry`: the same JSON as `python -m encompile.foundry`, one `fvtt-Actor-….json` per monster, for Foundry's Import Data (right-click an NPC actor in the Actors sidebar). The modal lists the files first; pick or type a folder (made if it doesn't exist; `res://` works), then Okay. Each stat block is written once, from every roster in every group. A monster used under its own names gets a file per name instead: the display name (the roster entry's local one, else its reference's) goes on the actor's sheet, and the short name (else the display name) on its prototype token, so `fvtt-Actor-bandit-captain-red-fang.json` is "Red Fang" with a "Fang" token. The stat block itself isn't changed. Afterwards the modal lists what was written and the compiler's warnings; a monster that couldn't be built is listed and the rest are still written. The folder is remembered for next time. Spells get cached copies when the compiler folder has `Spells.zip` (see the compiler's README).
 
@@ -86,12 +88,12 @@ Encounters follow `encounter_schema.xsd` (in enigma-narrative's `schemas/`): an 
 
 ```sh
 cargo test                  # unit tests and headless UI tests
-cargo test -- --ignored     # also the real compiler: drawing the SRD lich, exporting a renamed goblin
+cargo test -- --ignored     # also the real compiler: drawing the SRD lich, exporting a renamed goblin, a goblin encounter description
 ```
 
-The UI tests use [`iced_test`](https://docs.rs/iced_test/0.14.0) to drive the real view without a window: they click, type and drag through it, feed the messages back through `update`, and run every task the app returns. File dialogs are scripted and the stat block compiler and Foundry exporter are faked (see `src/ui_tests.rs`). `.cargo/config.toml` makes them render on the CPU, which keeps the suite under a second.
+The UI tests use [`iced_test`](https://docs.rs/iced_test/0.14.0) to drive the real view without a window: they click, type and drag through it, feed the messages back through `update`, and run every task the app returns. File dialogs are scripted and the stat block compiler, the description compiler and the Foundry exporter are faked (see `src/ui_tests.rs`). `.cargo/config.toml` makes them render on the CPU, which keeps the suite under a second.
 
-Native file dialogs and the real window's behaviour aren't covered; those are tested by using the app.
+Native file dialogs and the real windows' behaviour (opening and closing the description window) aren't covered; those are tested by using the app. The window-event routing that keeps the description window's resizes and keys away from the main window is tested by sending the events directly.
 
 ## Layout
 
@@ -103,11 +105,13 @@ Native file dialogs and the real window's behaviour aren't covered; those are te
 | `src/xp.rs` | XP by CR, the 2024 DMG budgets, difficulty ranges |
 | `src/monsters.rs` | Scanning monster folders |
 | `src/statblock.rs` | Compiling and caching stat block images |
+| `src/description.rs`, `src/description_modal.rs`, `src/description_window.rs` | Encounter descriptions: what goes in, compiling, the modal and the window |
 | `src/foundry.rs`, `src/export_modal.rs` | Foundry export: which files, running the export, and its modal |
 | `src/config.rs`, `src/config_modal.rs` | The config file and its modal |
 | `src/dialogs.rs` | File dialogs, behind a seam tests can script |
 | `src/ui_tests.rs` | Headless UI tests |
 | `scripts/statblock.py` | Run by the app through uv: compiles one monster with encompile and crops its stat block to PNGs |
+| `scripts/encounter_description.py` | Run by the app through uv: writes the description as a supplement, compiles it with encompile and renders its pages |
 | `scripts/foundry_export.py` | Run by the app through uv: builds actors with `encompile.foundry`, renames them and writes them |
 | `tools/make_icon.py` | Draws the icon from its 16x16 pixel grid into `assets/` |
 | `build.rs`, `assets/app.rc` | Embed the icon in the Windows `.exe` |

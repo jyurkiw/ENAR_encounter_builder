@@ -1,5 +1,8 @@
 mod config;
 mod config_modal;
+mod description;
+mod description_modal;
+mod description_window;
 mod dialogs;
 mod editor;
 mod encounter;
@@ -37,15 +40,20 @@ const DRAG_THRESHOLD: f32 = 5.0;
 const MONSTER_FILTER_INPUT: &str = "monster-filter";
 
 fn main() -> iced::Result {
-    iced::application(App::new, App::update, App::view)
-        .title(App::title)
+    // A daemon, for more than one window: the main window, and the encounter
+    // description's (see App::view_window). Closing the main window quits.
+    iced::daemon(App::new, App::update, App::view_window)
+        .title(App::window_title)
         .subscription(App::subscription)
-        .window(window::Settings {
-            size: INITIAL_SIZE,
-            icon: window_icon(),
-            ..window::Settings::default()
-        })
         .run()
+}
+
+fn main_window_settings() -> window::Settings {
+    window::Settings { size: INITIAL_SIZE, icon: window_icon(), ..window::Settings::default() }
+}
+
+fn description_window_settings() -> window::Settings {
+    window::Settings { size: Size::new(960.0, 1000.0), icon: window_icon(), ..window::Settings::default() }
 }
 
 /// The program icon: a pixel-art crocodile (tools/make_icon.py draws it).
@@ -157,6 +165,13 @@ struct App {
     /// The Export to Foundry modal, while it's open.
     export: Option<export_modal::ExportDialog>,
     exporter: foundry::Exporter,
+    /// The Encounter Description modal, while it's open.
+    description: Option<description_modal::DescriptionDialog>,
+    /// The description's window, while it's open.
+    description_window: Option<description_window::DescriptionWindow>,
+    describer: description::Compiler,
+    /// The main window (None in headless tests, which have no windows).
+    main_window: Option<window::Id>,
     /// A monster being dragged from the browser, from the press on its row.
     drag: Option<Drag>,
     /// The roster under the cursor (for dropping a dragged monster).
@@ -191,6 +206,14 @@ enum Message {
     /// Opens the Export to Foundry modal for the active encounter.
     OpenExport,
     Export(export_modal::Msg),
+    /// Opens the Encounter Description modal for the active encounter.
+    OpenDescription,
+    Description(description_modal::Msg),
+    DescriptionCompiled(Result<description::Compiled, String>),
+    DescriptionWindow(description_window::Msg),
+    /// An event from a window: acted on only if it's the main window's.
+    InWindow(window::Id, Box<Message>),
+    WindowClosed(window::Id),
 
     ToggleLhs(LhsTab),
     DividerPressed(Divider),
@@ -235,7 +258,9 @@ impl App {
         let (config, error) = Config::load_from(&config_path);
         let (mut app, task) = Self::with_config(config, config_path, Dialogs::Native);
         app.status = error.map(|text| Status { text, is_error: true });
-        (app, task)
+        let (id, open) = window::open(main_window_settings());
+        app.main_window = Some(id);
+        (app, Task::batch([task, open.then(window::size).map(Message::WindowResized)]))
     }
 
     /// Builds the app around a given config without reading any file.
@@ -266,15 +291,16 @@ impl App {
             config_editor: None,
             export: None,
             exporter: foundry::Exporter::default(),
+            description: None,
+            description_window: None,
+            describer: description::Compiler::default(),
+            main_window: None,
             drag: None,
             drop_hover: None,
             status: None,
         };
-        let size = window::latest()
-            .and_then(window::size)
-            .map(Message::WindowResized);
         let scan = app.rescan();
-        (app, Task::batch([size, scan]))
+        (app, scan)
     }
 
     fn title(&self) -> String {
@@ -333,7 +359,7 @@ impl App {
             None => {
                 let name = format!("{}.xml", doc.encounter.id);
                 let dir = PathBuf::from(&self.config.resource_dir);
-                Task::perform(self.dialogs.save_file(dir, name), move |p| Message::SavePicked(id, p))
+                Task::perform(self.dialogs.save_file(dir, name, dialogs::ENCOUNTER), move |p| Message::SavePicked(id, p))
             }
         }
     }
@@ -437,7 +463,7 @@ impl App {
                 }
             }
             Message::Shortcut(s) => {
-                if self.config_editor.is_none() && self.export.is_none() {
+                if self.config_editor.is_none() && self.export.is_none() && self.description.is_none() {
                     let msg = match s {
                         Shortcut::New => Message::New,
                         Shortcut::Open => Message::Open,
@@ -490,6 +516,51 @@ impl App {
                 }
             }
             Message::Export(msg) => return self.update_export(msg),
+
+            Message::OpenDescription => {
+                if let Some(doc) = self.active() {
+                    let e = &doc.encounter;
+                    let rosters: Vec<_> = description::roster_options(e).into_iter().map(|r| (r, true)).collect();
+                    let mut dialog = description_modal::DescriptionDialog {
+                        doc: doc.id,
+                        encounter: e.id.clone(),
+                        rosters,
+                        blocks: Vec::new(),
+                        missing: Vec::new(),
+                    };
+                    let (blocks, missing) =
+                        description::block_options(e, &dialog.chosen_rosters(), &self.config, &self.lookup());
+                    dialog.set_blocks(blocks, missing);
+                    self.description = Some(dialog);
+                }
+            }
+            Message::Description(msg) => return self.update_description(msg),
+            Message::DescriptionCompiled(result) => {
+                if let Some(w) = &mut self.description_window {
+                    w.state = match result {
+                        Ok(c) => description_window::State::Ready {
+                            pdf: c.pdf,
+                            pages: c.pages.into_iter().map(iced::widget::image::Handle::from_bytes).collect(),
+                            warnings: c.warnings,
+                        },
+                        Err(e) => description_window::State::Failed(e),
+                    };
+                }
+            }
+            Message::DescriptionWindow(msg) => return self.update_description_window(msg),
+            Message::InWindow(id, msg) => {
+                if self.main_window.is_none_or(|main| main == id) {
+                    return self.update(*msg);
+                }
+            }
+            Message::WindowClosed(id) => {
+                if Some(id) == self.main_window {
+                    return iced::exit();
+                }
+                if self.description_window.as_ref().is_some_and(|w| w.id == id) {
+                    self.description_window = None;
+                }
+            }
 
             Message::ToggleLhs(tab) => {
                 self.lhs = if self.lhs == Some(tab) { None } else { Some(tab) };
@@ -690,19 +761,142 @@ impl App {
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        let resize = window::resize_events().map(|(_, size)| Message::WindowResized(size));
-        let keys = event::listen_with(|event, status, _| key_message(event, status));
-        let mut subs = vec![resize, keys];
+        // Window events are tagged with their window: the main window's
+        // layout, shortcuts and drags ignore the description window's.
+        let resize = window::resize_events()
+            .map(|(id, size)| Message::InWindow(id, Box::new(Message::WindowResized(size))));
+        let keys = event::listen_with(|event, status, id| {
+            key_message(event, status).map(|m| Message::InWindow(id, Box::new(m)))
+        });
+        let closed = window::close_events().map(Message::WindowClosed);
+        let mut subs = vec![resize, keys, closed];
         if self.drag.is_some() {
             // Follow the pressed monster anywhere in the window, so letting go
             // off a roster (or off the body) ends the drag too.
-            subs.push(event::listen_with(|event, _, _| match event {
-                Event::Mouse(mouse::Event::CursorMoved { position }) => Some(Message::DragMoved(position)),
-                Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => Some(Message::DragReleased),
-                _ => None,
+            subs.push(event::listen_with(|event, _, id| {
+                let m = match event {
+                    Event::Mouse(mouse::Event::CursorMoved { position }) => Message::DragMoved(position),
+                    Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => Message::DragReleased,
+                    _ => return None,
+                };
+                Some(Message::InWindow(id, Box::new(m)))
             }));
         }
         Subscription::batch(subs)
+    }
+
+    /// The description modal's messages.
+    fn update_description(&mut self, msg: description_modal::Msg) -> Task<Message> {
+        use description_modal::Msg;
+        let Some(dialog) = &mut self.description else {
+            return Task::none();
+        };
+        match msg {
+            Msg::Roster(i, on) => {
+                if let Some(r) = dialog.rosters.get_mut(i) {
+                    r.1 = on;
+                }
+                let rosters = dialog.chosen_rosters();
+                let doc = dialog.doc;
+                let (blocks, missing) = match self.docs.iter().find(|d| d.id == doc) {
+                    Some(d) => description::block_options(&d.encounter, &rosters, &self.config, &self.lookup()),
+                    None => Default::default(),
+                };
+                if let Some(dialog) = &mut self.description {
+                    dialog.set_blocks(blocks, missing);
+                }
+            }
+            Msg::Block(i, on) => {
+                if let Some(b) = dialog.blocks.get_mut(i) {
+                    b.1 = on;
+                }
+            }
+            Msg::AllBlocks(on) => dialog.blocks.iter_mut().for_each(|b| b.1 = on),
+            Msg::Close => self.description = None,
+            Msg::Compile => {
+                if !dialog.can_compile() {
+                    return Task::none();
+                }
+                let Some(dialog) = self.description.take() else { return Task::none() };
+                let Some(doc) = self.docs.iter().find(|d| d.id == dialog.doc) else {
+                    return Task::none();
+                };
+                let e = &doc.encounter;
+                let out = description::out_dir(&self.cache_root, &e.id);
+                let job = description::job(
+                    e,
+                    &dialog.chosen_rosters(),
+                    &dialog.chosen_blocks(),
+                    &self.config,
+                    &self.lookup(),
+                    out,
+                );
+                let start_dir = doc
+                    .path
+                    .as_ref()
+                    .and_then(|p| p.parent().map(PathBuf::from))
+                    .unwrap_or_else(|| PathBuf::from(&self.config.resource_dir));
+                let tools = description::Tools {
+                    compiler_dir: self.config.resolve(&self.config.compiler_dir),
+                    uv_command: self.config.uv_command.clone(),
+                    cache_root: self.cache_root.clone(),
+                };
+                // One description window: a new description replaces what it shows.
+                let (id, show) = match &self.description_window {
+                    Some(w) => (w.id, window::gain_focus(w.id)),
+                    None => {
+                        let (id, open) = window::open(description_window_settings());
+                        (id, open.discard())
+                    }
+                };
+                self.description_window = Some(description_window::DescriptionWindow {
+                    id,
+                    title: job.title.clone(),
+                    start_dir,
+                    state: description_window::State::Compiling,
+                    saved: None,
+                });
+                let compile = Task::perform(
+                    description::compile(self.describer.clone(), job, tools),
+                    Message::DescriptionCompiled,
+                );
+                return Task::batch([show, compile]);
+            }
+        }
+        Task::none()
+    }
+
+    /// The description window's messages.
+    fn update_description_window(&mut self, msg: description_window::Msg) -> Task<Message> {
+        use description_window::Msg;
+        let Some(w) = &mut self.description_window else {
+            return Task::none();
+        };
+        match msg {
+            Msg::SavePdf => {
+                if w.pdf().is_some() {
+                    let name = format!("{}.pdf", w.title);
+                    let ask = self.dialogs.save_file(w.start_dir.clone(), name, dialogs::PDF);
+                    return Task::perform(ask, |p| Message::DescriptionWindow(Msg::SaveTo(p)));
+                }
+            }
+            Msg::SaveTo(None) => {}
+            Msg::SaveTo(Some(path)) => {
+                let path = if path.extension().is_none() { path.with_extension("pdf") } else { path };
+                if let Some(pdf) = w.pdf() {
+                    w.saved = Some(match std::fs::copy(pdf, &path) {
+                        Ok(_) => Ok(path),
+                        Err(e) => Err(format!("Couldn't save {}: {e}", path.display())),
+                    });
+                }
+            }
+        }
+        Task::none()
+    }
+
+    /// The monster files' name and CR for a reference's stat block.
+    fn lookup(&self) -> impl Fn(&encounter::Reference) -> Option<(String, Option<String>)> + '_ {
+        |r| self.referenced_monster(r).map(|(_, m)| (m.name.clone(), m.cr.clone()))
     }
 
     // ----- views -------------------------------------------------------------
@@ -717,6 +911,21 @@ impl App {
         let lhs = if self.lhs.is_some() { self.lhs_width() + DIVIDER_WIDTH } else { 0.0 };
         let room = self.window_width - TAB_STRIP_WIDTH - lhs - DIVIDER_WIDTH - MIN_MAIN_WIDTH;
         (self.rhs_ratio * self.window_width).min(room).max(200.0)
+    }
+
+    /// A window's view: the description's window, or the main window.
+    fn view_window(&self, id: window::Id) -> Element<'_, Message> {
+        match &self.description_window {
+            Some(w) if w.id == id => w.view().map(Message::DescriptionWindow),
+            _ => self.view(),
+        }
+    }
+
+    fn window_title(&self, id: window::Id) -> String {
+        match &self.description_window {
+            Some(w) if w.id == id => format!("{} — Encounter Description", w.title),
+            _ => self.title(),
+        }
     }
 
     fn view(&self) -> Element<'_, Message> {
@@ -794,10 +1003,11 @@ impl App {
             }
             _ => space().into(),
         };
-        let modal: Element<_> = match (&self.config_editor, &self.export) {
-            (Some(editor), _) => ui::modal_layer(editor.view().map(Message::Config)),
-            (None, Some(export)) => ui::modal_layer(export.view().map(Message::Export)),
-            (None, None) => space().into(),
+        let modal: Element<_> = match (&self.config_editor, &self.export, &self.description) {
+            (Some(editor), _, _) => ui::modal_layer(editor.view().map(Message::Config)),
+            (None, Some(export), _) => ui::modal_layer(export.view().map(Message::Export)),
+            (None, None, Some(d)) => ui::modal_layer(d.view().map(Message::Description)),
+            (None, None, None) => space().into(),
         };
         iced::widget::stack![page, ghost, modal].into()
     }
@@ -814,6 +1024,7 @@ impl App {
                 btn("Save", has_doc.then_some(Message::Save)),
                 btn("Save All", (!self.docs.is_empty()).then_some(Message::SaveAll)),
                 rule::vertical(1),
+                btn("Encounter Description", has_doc.then_some(Message::OpenDescription)),
                 btn("Export to Foundry", has_doc.then_some(Message::OpenExport)),
                 rule::vertical(1),
                 btn("Configuration", Some(Message::OpenConfig)),

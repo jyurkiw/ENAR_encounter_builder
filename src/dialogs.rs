@@ -7,6 +7,11 @@ use std::pin::Pin;
 
 pub type DialogFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 
+/// A save dialog's file type: its name and extensions.
+pub type Filter = (&'static str, &'static [&'static str]);
+pub const ENCOUNTER: Filter = ("Encounter", &["xml"]);
+pub const PDF: Filter = ("PDF", &["pdf"]);
+
 #[derive(Debug, Clone, Default)]
 pub enum Dialogs {
     /// The operating system's dialogs, through rfd.
@@ -39,12 +44,12 @@ impl Dialogs {
         }
     }
 
-    /// Asks where to save an `.xml` file.
-    pub fn save_file(&self, dir: PathBuf, name: String) -> DialogFuture<Option<PathBuf>> {
+    /// Asks where to save a file of this type.
+    pub fn save_file(&self, dir: PathBuf, name: String, (kind, extensions): Filter) -> DialogFuture<Option<PathBuf>> {
         match self {
             Dialogs::Native => Box::pin(async move {
                 rfd::AsyncFileDialog::new()
-                    .add_filter("Encounter", &["xml"])
+                    .add_filter(kind, extensions)
                     .set_directory(dir)
                     .set_file_name(name)
                     .save_file()

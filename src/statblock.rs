@@ -85,7 +85,7 @@ pub fn cached(cache_root: &Path, key: &Key) -> Option<Vec<PathBuf>> {
 }
 
 /// page0.png, page1.png, ... in order.
-fn pages(dir: &Path) -> Vec<PathBuf> {
+pub fn pages(dir: &Path) -> Vec<PathBuf> {
     let mut pages: Vec<(u32, PathBuf)> = std::fs::read_dir(dir)
         .into_iter()
         .flatten()
